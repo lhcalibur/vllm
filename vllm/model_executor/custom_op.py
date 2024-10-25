@@ -26,6 +26,9 @@ class CustomOp(nn.Module):
     def forward_cuda(self, *args, **kwargs):
         raise NotImplementedError
 
+    def forward_triton(self, *args, **kwargs):
+        raise NotImplementedError
+
     def forward_hip(self, *args, **kwargs):
         # By default, we assume that HIP ops are compatible with CUDA ops.
         return self.forward_cuda(*args, **kwargs)
@@ -67,4 +70,7 @@ class CustomOp(nn.Module):
         elif is_xpu():
             return self.forward_xpu
         else:
-            return self.forward_cuda
+            if envs.VLLM_PREFER_TRITON_OPS:
+                return self.forward_triton
+            else:
+                return self.forward_cuda

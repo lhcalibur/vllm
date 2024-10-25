@@ -213,6 +213,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_TEST_COMPILE_NO_CUSTOM_OPS":
     lambda: int(os.environ.get("VLLM_TEST_COMPILE_NO_CUSTOM_OPS", "0")),
 
+    # Internal flag to control whether we use custom triton op,
+    # or use the native pytorch implementation
+    "VLLM_PREFER_TRITON_OPS":
+    lambda: int(os.environ.get("VLLM_PREFER_TRITON_OPS", "0")),
+
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(

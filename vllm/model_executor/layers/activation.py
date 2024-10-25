@@ -46,6 +46,15 @@ class SiluAndMul(CustomOp):
         ops.silu_and_mul(out, x)
         return out
 
+    def forward_triton(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm import _triton_ops as ops
+
+        d = x.shape[-1] // 2
+        output_shape = (x.shape[:-1] + (d, ))
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        ops.silu_and_mul(out, x)
+        return out
+
 
 class GeluAndMul(CustomOp):
     """An activation function for GeGLU.
@@ -92,6 +101,18 @@ class GeluAndMul(CustomOp):
             ops.gelu_tanh_and_mul(out, x)
         return out
 
+    def forward_triron(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm import _triton_ops as ops
+
+        d = x.shape[-1] // 2
+        output_shape = (x.shape[:-1] + (d, ))
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        if self.approximate == "none":
+            ops.gelu_and_mul(out, x)
+        elif self.approximate == "tanh":
+            ops.gelu_tanh_and_mul(out, x)
+        return out
+
     def extra_repr(self) -> str:
         return f'approximate={repr(self.approximate)}'
 
@@ -116,6 +137,13 @@ class NewGELU(CustomOp):
 
         return ops.gelu_new(x)
 
+    def forward_triton(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm import _triton_ops as ops
+
+        out = torch.empty_like(x)
+        ops.gelu_new(out, x)
+        return out
+
 
 class FastGELU(CustomOp):
 
@@ -135,6 +163,13 @@ class FastGELU(CustomOp):
         from vllm._ipex_ops import ipex_ops as ops
 
         return ops.gelu_fast(x)
+
+    def forward_triton(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm import _triton_ops as ops
+
+        out = torch.empty_like(x)
+        ops.gelu_fast(out, x)
+        return out
 
 
 class QuickGELU(CustomOp):
@@ -160,6 +195,13 @@ class QuickGELU(CustomOp):
 
     # TODO implement forward_xpu for QuickGELU
     # def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+
+    def forward_triton(self, x: torch.Tensor) -> torch.Tensor:
+        from vllm import _triton_ops as ops
+
+        out = torch.empty_like(x)
+        ops.gelu_quick(out, x)
+        return out
 
 
 class ReLUSquaredActivation(CustomOp):

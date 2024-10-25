@@ -24,6 +24,7 @@ class _Backend(enum.Enum):
     FLASHINFER = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    TRITON = enum.auto()
 
 
 def backend_name_to_enum(backend_name: str) -> _Backend:
@@ -146,6 +147,9 @@ def get_attn_backend(
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
         return PallasAttentionBackend
+    elif backend == _Backend.TRITON:
+        from vllm.attention.backends.triton_flash_attn import TritonFlashAttentionBackend
+        return TritonFlashAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")
 

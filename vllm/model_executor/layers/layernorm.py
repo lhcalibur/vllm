@@ -87,6 +87,30 @@ class RMSNorm(CustomOp):
             self.weight.data,
             self.variance_epsilon,
         )
+    
+    def forward_triton(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from vllm._triton_ops import rms_norm, fused_add_rms_norm
+
+        if residual is not None:
+            fused_add_rms_norm(
+                x,
+                residual,
+                self.weight.data,
+                self.variance_epsilon,
+            )
+            return x, residual
+        out = torch.empty_like(x)
+        rms_norm(
+            out,
+            x,
+            self.weight.data,
+            self.variance_epsilon,
+        )
+        return out
 
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
