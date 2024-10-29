@@ -101,7 +101,7 @@ class GeluAndMul(CustomOp):
             ops.gelu_tanh_and_mul(out, x)
         return out
 
-    def forward_triron(self, x: torch.Tensor) -> torch.Tensor:
+    def forward_triton(self, x: torch.Tensor) -> torch.Tensor:
         from vllm import _triton_ops as ops
 
         d = x.shape[-1] // 2

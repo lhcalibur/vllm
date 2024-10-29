@@ -13,8 +13,8 @@ from vllm import _triton_ops as ops
 from .allclose_default import get_default_atol, get_default_rtol
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-NUM_TOKENS = [7, 83, 2048]  # Arbitrary values for testing
-D = [512, 4096, 5120, 13824]  # Arbitrary values for testing
+NUM_TOKENS = [7, 83, 2048, 131072]  # Arbitrary values for testing
+D = [512, 4096, 5120, 13824, 14336]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
@@ -48,11 +48,18 @@ def test_act_and_mul(
     elif activation == "gelu_tanh":
         layer = GeluAndMul(approximate="tanh")
         fn = ops.gelu_tanh_and_mul
-    out = layer(x)
-    ref_out = layer.forward_native(x)
-    # The SiLU and GELU implementations are equivalent to the native PyTorch
-    # implementations, so we can do exact comparison.
-    torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
+    out = layer.forward_triton(x)
+
+    # Prevent assert_close from OOM
+    if num_tokens > 13824 or d > 8192:
+        out = out.cpu()
+        ref_out = layer.forward_cuda(x).cpu()
+    else:
+        ref_out = layer.forward_native(x)
+    
+    torch.testing.assert_close(out, ref_out,
+                               atol=get_default_atol(out),
+                               rtol=get_default_rtol(out))
 
     d = x.shape[-1] // 2
     output_shape = (x.shape[:-1] + (d, ))
@@ -82,7 +89,7 @@ def test_activation(
     x = torch.randn(num_tokens, d, dtype=dtype)
     layer = activation[0]()
     fn = activation[1]
-    out = layer(x)
+    out = layer.forward_triton(x)
     ref_out = layer.forward_native(x)
     torch.testing.assert_close(out,
                                ref_out,

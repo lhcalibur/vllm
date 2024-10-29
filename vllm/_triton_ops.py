@@ -18,20 +18,25 @@ def silu_kernel(x):
     # # Use 2^x instead of e^x results in an additional scale factor of log2(e)
     # return x / (1.0 + tl.exp2(-x * 1.44269504089))
 
+    dtype = x.dtype
     x = tl.cast(x, tl.float32)
-    return x * tl.sigmoid(x)
+    return (x * tl.sigmoid(x)).to(dtype)
 
 @triton.jit
 def gelu_kernel(x):
     # GELU kernel based on CUAD code
     # Equivalent to PyTorch GELU with 'none' approximation
     M_SQRT1_2 = 0.70710678118654752440  # 1/sqrt(2)
-    return x * 0.5 * (1.0 + tl.erf(x * M_SQRT1_2))
+    dtype = x.dtype
+    x = tl.cast(x, tl.float32)
+    return (x * 0.5 * (1.0 + tl.erf(x * M_SQRT1_2))).to(dtype)
 
 @triton.jit
-def tanh(x):
+def tanhf(x):
     # Tanh is just a scaled sigmoid
-    return 2 * tl.sigmoid(2 * x) - 1
+    CONST_2F = tl.cast(2, tl.float32)
+    x = tl.cast(x, tl.float32)
+    return CONST_2F * tl.sigmoid(CONST_2F * x) - tl.cast(1, tl.float32)
 
 @triton.jit
 def gelu_tanh_kernel(x):
@@ -42,26 +47,30 @@ def gelu_tanh_kernel(x):
     BETA = M_SQRT2 * M_2_SQRTPI * 0.5
     KAPPA = 0.044715
 
+    dtype = x.dtype
+    x = tl.cast(x, tl.float32)
+
     x_cube = x * x * x
     inner = BETA * (x + KAPPA * x_cube)
-    return x * 0.5 * (1.0 + tanh(inner))
+    return (x * 0.5 * (1.0 + tanhf(inner))).to(dtype)
 
 @triton.jit
 def gelu_new_kernel(x):
     # GELU kernel based on the 'new' approximation
     # Equivalent to the CUDA code provided
-    x_cube = x * x * x
-    inner = 0.79788456 * (x + 0.044715 * x_cube)
-    t = tanh(inner)
-    return 0.5 * x * (1.0 + t)
+    x_cube_f = (x * x * x).to(tl.float32)
+    inner = tl.cast(0.79788456, tl.float32) * (x + (tl.cast(0.044715, tl.float32) * x_cube_f).to(x.dtype)).to(tl.float32)
+    t = tanhf(inner.to(x.dtype)).to(x.dtype)
+    return tl.cast(0.5, x.dtype) * x * (tl.cast(1.0, x.dtype) + t)
 
 @triton.jit
 def gelu_fast_kernel(x):
     # GELU kernel based on the 'fast' approximation
     # Similar to the CUDA code for fast approximation
-    f = x
-    t = tanh(0.79788456 * f * (1.0 + 0.044715 * f * x))
-    return 0.5 * x * (1.0 + t)
+    x_f = tl.cast(x, tl.float32)
+    t = tanhf((tl.cast(0.79788456, tl.float32) * x_f).to(x.dtype) * (tl.cast(1.0, x.dtype) + (tl.cast(0.044715, tl.float32) * x_f).to(x.dtype) * x))
+    t = t.to(x.dtype)
+    return tl.cast(0.5, x.dtype) * x * (tl.cast(1.0, x.dtype) + t)
 
 @triton.jit
 def gelu_quick_kernel(x):
@@ -70,10 +79,18 @@ def gelu_quick_kernel(x):
     # Use 2^x instead of e^x results in an additional scale factor of log2(e)
     # return x / (1.0 + tl.exp2(-1.702 * x * 1.44269504089))
 
-    x = tl.cast(x, tl.float32)
-    return x * tl.sigmoid(1.702 * x)
+    dtype = x.dtype
+    x_f = tl.cast(x, tl.float32)
+    return (x_f * tl.sigmoid(tl.cast(1.702, tl.float32) * x_f)).to(dtype)
 
 
+# @triton.autotune(configs=[
+#     triton.Config(kwargs={'BLOCK_SIZE': 128}, num_warps=4),
+#     triton.Config(kwargs={'BLOCK_SIZE': 1024}, num_warps=8),
+#     triton.Config(kwargs={'BLOCK_SIZE': 1024}, num_warps=16),
+#   ],
+#   key=['D', 'num_tokens']
+# )
 @triton.jit
 def act_and_mul_kernel(
     out_ptr,  # Output pointer (flattened tensor)
@@ -83,7 +100,8 @@ def act_and_mul_kernel(
     ACTIVATION_TYPE: tl.constexpr, 
 ):
     # Program IDs
-    token_id = tl.program_id(0)  # Get token index for this kernel instance
+    # Cast to int64 to prevent from Invalid memory access: https://github.com/triton-lang/triton/issues/1058
+    token_id = tl.program_id(0).to(tl.int64)  # Get token index for this kernel instance
     block_start = tl.arange(0, BLOCK_SIZE)  # Create a range of BLOCK_SIZE elements
 
     # Precompute common base pointers outside the loop for efficiency
@@ -102,9 +120,8 @@ def act_and_mul_kernel(
         input_ptr1 = input_base_ptr1 + block_id  # First half (input values)
         input_ptr2 = input_base_ptr2 + block_id  # Second half (gate values)
 
-        # Load input and gate values with masking
-        input_vals = tl.load(input_ptr1, mask=mask, other=0.0)  # Load input values
-        gate_vals = tl.load(input_ptr2, mask=mask, other=0.0)  # Load gate values
+        # Load input values with masking
+        input_vals = tl.load(input_ptr1, mask=mask)  # Load input values
 
         # Apply the selected activation function on input_vals
         if ACTIVATION_TYPE == SILU_FUNC_TYPE:
@@ -116,8 +133,10 @@ def act_and_mul_kernel(
         else:
             activated_vals = input_vals  # No activation if the type is unknown
 
+        # Load values with masking
+        gate_vals = tl.load(input_ptr2, mask=mask)  # Load gate values
         # Elementwise multiply activation with gate_vals
-        result = activated_vals * gate_vals
+        result = activated_vals.to(gate_vals.dtype) * gate_vals
 
         # Store the result in the output tensor
         tl.store(out_ptr_base + block_id, result, mask=mask)
@@ -143,7 +162,8 @@ def launch_activation_and_mul(out: torch.Tensor, input: torch.Tensor, activation
     device = torch.cuda.device_of(input)
     with torch.cuda.device(device):
         act_and_mul_kernel[(num_tokens,)](
-            out, input, d,
+            out, input, 
+            d,
             BLOCK_SIZE=BLOCK_SIZE,
             ACTIVATION_TYPE=activation_type,
         )
@@ -199,7 +219,8 @@ def activation_kernel(
     ACTIVATION_TYPE: tl.constexpr,
 ):
     # Program IDs
-    token_id = tl.program_id(0)  # Get token index for this kernel instance
+    # Cast to int64 to prevent from Invalid memory access: https://github.com/triton-lang/triton/issues/1058
+    token_id = tl.program_id(0).to(tl.int64)  # Get token index for this kernel instance
     block_start = tl.arange(0, BLOCK_SIZE)  # Create a range of BLOCK_SIZE elements
 
     # Precompute base pointers for efficiency
@@ -217,7 +238,7 @@ def activation_kernel(
         input_ptr_curr = input_base_ptr + block_id  # Input values
 
         # Load input values with masking
-        input_vals = tl.load(input_ptr_curr, mask=mask, other=0.0)  # Load input values
+        input_vals = tl.load(input_ptr_curr, mask=mask)  # Load input values
 
         # Apply the selected activation function on input_vals
         if ACTIVATION_TYPE == GELU_NEW_FUNC_TYPE:
