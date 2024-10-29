@@ -374,7 +374,8 @@ def reshape_and_cache(
     )
 
 
-# Requires triton 2.2.0
+# Requires triton >= 2.2.0
+# TODO add FP8 support
 @torch.library.custom_op("triton::paged_attention",
                          mutates_args=["out"], device_types="cuda")
 def paged_attention(

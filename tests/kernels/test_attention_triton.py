@@ -30,6 +30,7 @@ HEAD_SIZES = [64, 80, 96, 112, 120, 128, 192, 256]
 
 BLOCK_SIZES = [16, 32]
 USE_ALIBI = [False, True]
+# TODO add FP8 test
 KV_CACHE_DTYPE = ["auto"]
 SEEDS = [0]
 CUDA_DEVICES = [
