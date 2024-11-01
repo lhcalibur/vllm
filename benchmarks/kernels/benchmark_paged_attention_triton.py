@@ -12,20 +12,39 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
 NUM_BLOCKS = 1024
 PARTITION_SIZE = 512
 
-@triton.testing.perf_report(
-    triton.testing.Benchmark(
-        x_names=['batch_size'],  # 变量参数
-        x_vals=[1, 2, 4, 8, 16, 32, 64, 128],  # 对应的取值
-        line_arg='version',       # 用于比较的参数
-        line_vals=['v1', 'v2', 'triton'],  # 要比较的版本
-        line_names=['PagedAttn-v1', 'PagedAttn-v2', 'PagedAttn-Triton'],  # 图例名称
-        styles=[('blue', '-'), ('red', '-'), ('green', '-')],  # 线条样式
-        ylabel='Runtime (ms)',    # y轴标签
-        plot_name='paged-attention-performance',  # 图表名称
-        args={
-        }
-    )
-)
+def create_benchmark_configs():
+    configs = []
+    for head_size in [64, 80, 96, 112, 120, 128, 192, 256]:
+        for block_size in [16, 32]:
+            for dtype in ["half", "bfloat16", "float"]:
+                configs.append(
+                    triton.testing.Benchmark(
+                        x_names=["batch_size"],  # 变量参数
+                        x_vals=[1, 2, 4, 8, 16, 32, 64, 128],  # 对应的取值
+                        line_arg="version",  # 用于比较的参数
+                        line_vals=["v1", "v2", "triton"],  # 要比较的版本
+                        line_names=[
+                            "PagedAttn-v1",
+                            "PagedAttn-v2",
+                            "PagedAttn-Triton",
+                        ],  # 图例名称
+                        styles=[
+                            ("blue", "-"),
+                            ("red", "-"),
+                            ("green", "-"),
+                        ],  # 线条样式
+                        ylabel="Runtime (ms)",  # y轴标签
+                        plot_name=f"paged-attention-dtype-{dtype}-head_size-{head_size}-block_size-{block_size}",  # 图表名称
+                        args={
+                            "head_size": head_size,
+                            "block_size": block_size,
+                            "dtype": STR_DTYPE_TO_TORCH_DTYPE[dtype],
+                        },
+                    )
+                )
+    return configs
+
+@triton.testing.perf_report(create_benchmark_configs())
 def benchmark_paged_attention(
     batch_size: int,
     seq_len: int,
@@ -142,16 +161,7 @@ def main():
     parser.add_argument("--seq-len", type=int, default=4096)
     parser.add_argument("--num-query-heads", type=int, default=64)
     parser.add_argument("--num-kv-heads", type=int, default=8)
-    parser.add_argument("--head-size",
-                       type=int,
-                       choices=[64, 80, 96, 112, 120, 128, 192, 256],
-                       default=128)
-    parser.add_argument("--block-size", type=int, choices=[16, 32], default=16)
     parser.add_argument("--use-alibi", action="store_true")
-    parser.add_argument("--dtype",
-                       type=str,
-                       choices=["half", "bfloat16", "float"],
-                       default="half")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--kv-cache-dtype",
@@ -171,10 +181,7 @@ def main():
         seq_len=args.seq_len,
         num_query_heads=args.num_query_heads,
         num_kv_heads=args.num_kv_heads,
-        head_size=args.head_size,
-        block_size=args.block_size,
         use_alibi=args.use_alibi,
-        dtype=STR_DTYPE_TO_TORCH_DTYPE[args.dtype],
         seed=args.seed,
         kv_cache_dtype=args.kv_cache_dtype,
     )
