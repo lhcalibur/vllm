@@ -40,7 +40,7 @@ PARTITION_SIZE = 512
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_GEN_SEQS = [7]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
-NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
+NUM_HEADS = [(21, 7), (40, 40), (64, 8)]  # Arbitrary values for testing
 
 # FlashAttention forward only supports head dimension at most 128
 # https://github.com/ROCmSoftwarePlatform/flash-attention/blob/3d2b6f5d037782cc2c906909a46fb7e2e1b48b25/csrc/flash_attn_rocm/flash_api.cpp#L62

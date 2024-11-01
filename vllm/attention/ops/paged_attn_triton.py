@@ -363,14 +363,14 @@ def reshape_and_cache(key: torch.Tensor, value: torch.Tensor,
                          mutates_args=["out"],
                          device_types="cuda")
 def paged_attention(
-    out: torch.
-    Tensor,  # [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE, HEAD_SIZE]
-    query: torch.
-    Tensor,  # [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE, HEAD_SIZE]
-    key_cache: torch.
-    Tensor,  # [num_blocks, NUM_KV_HEADS, HEAD_SIZE/x, KV_BLOCK_SIZE, x]
-    value_cache: torch.
-    Tensor,  # [num_blocks, NUM_KV_HEADS, HEAD_SIZE, KV_BLOCK_SIZE]
+    out: torch.Tensor,  # [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE,
+    # HEAD_SIZE]
+    query: torch.Tensor,  # [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE,
+    # HEAD_SIZE]
+    key_cache: torch.Tensor,  # [num_blocks, NUM_KV_HEADS, HEAD_SIZE/x,
+    # KV_BLOCK_SIZE, x]
+    value_cache: torch.Tensor,  # [num_blocks, NUM_KV_HEADS, HEAD_SIZE,
+    # KV_BLOCK_SIZE]
     num_kv_heads: int,
     attn_scale: float,
     block_tables: torch.Tensor,  # [num_seqs, max_num_blocks_per_seq]
@@ -547,6 +547,7 @@ def paged_attention(
                 head_size,
                 padded_head_size,
                 query_group_size,
+                padded_group_size,
                 num_kv_heads,
                 partition_size,
                 next_num_splits,
@@ -672,7 +673,6 @@ def _paged_attn_kernel(
                 block_offset[:, None] * stride_v_cache_bl)
 
     # Load queries.
-    # [PADDED_QUERY_GROUP_SIZE, HEAD_SIZE]
     q_offset = (seq_idx * stride_qbs +
                 (head_idx + padding_group_offset[:, None]) * stride_qh +
                 head_offset[None, :] * stride_qd)
@@ -688,7 +688,6 @@ def _paged_attn_kernel(
                                padding_group_offset[:, None],
                                mask=group_mask,
                                other=0.0)
-
     m_i = tl.full([PADDED_QUERY_GROUP_SIZE], -float("inf"), dtype=tl.float32)
     l_i = tl.zeros([PADDED_QUERY_GROUP_SIZE], dtype=tl.float32)
     acc = tl.zeros([PADDED_QUERY_GROUP_SIZE, PADDED_HEAD_SIZE],
@@ -706,8 +705,6 @@ def _paged_attn_kernel(
 
         k_pos_range = block_idx * KV_BLOCK_SIZE + block_offset
         k_pos_range_mask = k_pos_range < context_len
-        # k_mask = mask_offset[None, :] < context_len
-        # v_mask = mask_offset[:, None] < context_len
 
         # k: [HEAD_SIZE, KV_BLOCK_SIZE]
         k = tl.load(k_cache_ptr + k_block_offset,
@@ -792,6 +789,7 @@ def _paged_attn_v2_reduce_kernel(
     HEAD_SIZE: tl.constexpr,
     PADDED_HEAD_SIZE: tl.constexpr,
     QUERY_GROUP_SIZE: tl.constexpr,
+    PADDED_QUERY_GROUP_SIZE: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
     PARTITION_SIZE: tl.constexpr,
     PADDED_NUM_PARTITIONS: tl.constexpr,
@@ -805,19 +803,24 @@ def _paged_attn_v2_reduce_kernel(
     head_offset = tl.arange(0, PADDED_HEAD_SIZE)
 
     num_partitions = tl.cdiv(context_len, PARTITION_SIZE)
-    group_head_offset = (tl.arange(0, QUERY_GROUP_SIZE)[:, None] * HEAD_SIZE +
-                         head_offset[None, :])
+    group_head_offset = (
+        tl.arange(0, PADDED_QUERY_GROUP_SIZE)[:, None] * HEAD_SIZE +
+        head_offset[None, :])
+    group_mask = tl.arange(0, PADDED_QUERY_GROUP_SIZE) < QUERY_GROUP_SIZE
 
     dim_mask = tl.where(head_offset < HEAD_SIZE, 1, 0).to(tl.int1)  # [D]
     if num_partitions == 1:
         tmp_out_offset = ((seq_idx * NUM_KV_HEADS + kv_head_idx) *
                           max_num_partitions * QUERY_GROUP_SIZE * HEAD_SIZE +
                           group_head_offset)
-        tmp_out = tl.load(tmp_out_ptr + tmp_out_offset, mask=dim_mask[None, :])
+        tmp_out = tl.load(tmp_out_ptr + tmp_out_offset,
+                          mask=dim_mask[None, :] & group_mask[:, None])
 
         out_offset = (seq_idx * stride_obs + head_idx * stride_oh +
                       group_head_offset * stride_od)
-        tl.store(out_ptr + out_offset, tmp_out, mask=dim_mask[None, :])
+        tl.store(out_ptr + out_offset,
+                 tmp_out,
+                 mask=dim_mask[None, :] & group_mask[:, None])
         return
 
     # Get the global max logit.
@@ -825,37 +828,46 @@ def _paged_attn_v2_reduce_kernel(
         (seq_idx * NUM_KV_HEADS + kv_head_idx) * max_num_partitions *
         QUERY_GROUP_SIZE +
         tl.arange(0, PADDED_NUM_PARTITIONS)[:, None] * QUERY_GROUP_SIZE +
-        tl.arange(0, QUERY_GROUP_SIZE)[None, :])
+        tl.arange(0, PADDED_QUERY_GROUP_SIZE)[None, :])
 
     mask = tl.arange(0, PADDED_NUM_PARTITIONS)[:, None] < num_partitions
     # m_i: [PADDED_NUM_PARTITIONS, QUERY_GROUP_SIZE]
-    m_i = tl.load(m_i_ptr + ml_offset, mask=mask, other=float("-inf"))
+    m_i = tl.load(m_i_ptr + ml_offset,
+                  mask=mask & group_mask[None, :],
+                  other=float("-inf"))
     # m: [QUERY_GROUP_SIZE]
     m = tl.max(m_i, axis=0)
 
     # Rescale the exp sums and compute the global sum.
-    # l_i: [PADDED_NUM_PARTITIONS, QUERY_GROUP_SIZE]
-    l_i = tl.load(l_i_ptr + ml_offset, mask=mask, other=0.0)
+    # l_i: [PADDED_NUM_PARTITIONS, PADDED_QUERY_GROUP_SIZE]
+    l_i = tl.load(l_i_ptr + ml_offset,
+                  mask=mask & group_mask[None, :],
+                  other=0.0)
     l_i *= tl.exp(m_i - m[None, :])
-    # l: [QUERY_GROUP_SIZE]
+    # l: [PADDED_QUERY_GROUP_SIZE]
     l = tl.sum(l_i, axis=0)  # noqa: E741
-    # r: [PADDED_NUM_PARTITIONS, QUERY_GROUP_SIZE]
+    # r: [PADDED_NUM_PARTITIONS, PADDED_QUERY_GROUP_SIZE]
     r = l_i / l[None, :]
-    r = tl.reshape(r, (PADDED_NUM_PARTITIONS, QUERY_GROUP_SIZE, 1))
+    r = tl.reshape(r, (PADDED_NUM_PARTITIONS, PADDED_QUERY_GROUP_SIZE, 1))
 
     tmp_out_offset = (
         (seq_idx * NUM_KV_HEADS + kv_head_idx) * max_num_partitions *
         QUERY_GROUP_SIZE * HEAD_SIZE +
         tl.arange(0, PADDED_NUM_PARTITIONS)[:, None, None] * QUERY_GROUP_SIZE *
-        HEAD_SIZE + tl.arange(0, QUERY_GROUP_SIZE)[None, :, None] * HEAD_SIZE +
+        HEAD_SIZE +
+        tl.arange(0, PADDED_QUERY_GROUP_SIZE)[None, :, None] * HEAD_SIZE +
         head_offset[None, None, :])
-    # tmp_out: [PADDED_NUM_PARTITIONS, QUERY_GROUP_SIZE, PADDED_HEAD_SIZE]
+    # tmp_out: [PADDED_NUM_PARTITIONS, PADDED_QUERY_GROUP_SIZE,
+    #           PADDED_HEAD_SIZE]
     tmp_out = tl.load(tmp_out_ptr + tmp_out_offset,
-                      mask=mask[:, :, None] & dim_mask[None, None, :],
+                      mask=mask[:, :, None] & dim_mask[None, None, :]
+                      & group_mask[None, :, None],
                       other=0.0)
-    # out: [QUERY_GROUP_SIZE, PADDED_HEAD_SIZE]
+    # out: [PADDED_QUERY_GROUP_SIZE, PADDED_HEAD_SIZE]
     out = tl.sum((tmp_out * r).to(tl.float32), axis=0)
 
     out_offset = (seq_idx * stride_obs + head_idx * stride_oh +
                   group_head_offset * stride_od)
-    tl.store(out_ptr + out_offset, out, mask=dim_mask[None, :])
+    tl.store(out_ptr + out_offset,
+             out,
+             mask=dim_mask[None, :] & group_mask[:, None])
