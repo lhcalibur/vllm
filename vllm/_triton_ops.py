@@ -29,9 +29,8 @@ GELU_NEW_FUNC_TYPE: tl.constexpr = 3
 GELU_FAST_FUNC_TYPE: tl.constexpr = 4
 GELU_QUICK_FUNC_TYPE: tl.constexpr = 5
 
-@libentry()
 @triton.jit
-def silu_kernel(x):
+def _silu_kernel(x):
     # SiLU (x * sigmoid(x))
 
     # # Use 2^x instead of e^x results in an additional scale factor of log2(e)
@@ -41,9 +40,8 @@ def silu_kernel(x):
     x = tl.cast(x, tl.float32)
     return (x * tl.sigmoid(x)).to(dtype)
 
-@libentry()
 @triton.jit
-def gelu_kernel(x):
+def _gelu_kernel(x):
     # GELU kernel based on CUAD code
     # Equivalent to PyTorch GELU with 'none' approximation
     M_SQRT1_2 = 0.70710678118654752440  # 1/sqrt(2)
@@ -51,17 +49,15 @@ def gelu_kernel(x):
     x = tl.cast(x, tl.float32)
     return (x * 0.5 * (1.0 + tl.erf(x * M_SQRT1_2))).to(dtype)
 
-@libentry()
 @triton.jit
-def tanhf(x):
+def _tanhf(x):
     # Tanh is just a scaled sigmoid
     CONST_2F = tl.cast(2, tl.float32)
     x = tl.cast(x, tl.float32)
     return CONST_2F * tl.sigmoid(CONST_2F * x) - tl.cast(1, tl.float32)
 
-@libentry()
 @triton.jit
-def gelu_tanh_kernel(x):
+def _gelu_tanh_kernel(x):
     # GELU kernel based on 'tanh' approximation
     # Equivalent to PyTorch GELU with 'tanh' approximation
     M_SQRT2 = 1.41421356237309504880  # sqrt(2)
@@ -74,31 +70,28 @@ def gelu_tanh_kernel(x):
 
     x_cube = x * x * x
     inner = BETA * (x + KAPPA * x_cube)
-    return (x * 0.5 * (1.0 + tanhf(inner))).to(dtype)
+    return (x * 0.5 * (1.0 + _tanhf(inner))).to(dtype)
 
-@libentry()
 @triton.jit
-def gelu_new_kernel(x):
+def _gelu_new_kernel(x):
     # GELU kernel based on the 'new' approximation
     # Equivalent to the CUDA code provided
     x_cube_f = (x * x * x).to(tl.float32)
     inner = tl.cast(0.79788456, tl.float32) * (x + (tl.cast(0.044715, tl.float32) * x_cube_f).to(x.dtype)).to(tl.float32)
-    t = tanhf(inner.to(x.dtype)).to(x.dtype)
+    t = _tanhf(inner.to(x.dtype)).to(x.dtype)
     return tl.cast(0.5, x.dtype) * x * (tl.cast(1.0, x.dtype) + t)
 
-@libentry()
 @triton.jit
-def gelu_fast_kernel(x):
+def _gelu_fast_kernel(x):
     # GELU kernel based on the 'fast' approximation
     # Similar to the CUDA code for fast approximation
     x_f = tl.cast(x, tl.float32)
-    t = tanhf((tl.cast(0.79788456, tl.float32) * x_f).to(x.dtype) * (tl.cast(1.0, x.dtype) + (tl.cast(0.044715, tl.float32) * x_f).to(x.dtype) * x))
+    t = _tanhf((tl.cast(0.79788456, tl.float32) * x_f).to(x.dtype) * (tl.cast(1.0, x.dtype) + (tl.cast(0.044715, tl.float32) * x_f).to(x.dtype) * x))
     t = t.to(x.dtype)
     return tl.cast(0.5, x.dtype) * x * (tl.cast(1.0, x.dtype) + t)
 
-@libentry()
 @triton.jit
-def gelu_quick_kernel(x):
+def _gelu_quick_kernel(x):
     # GELU kernel based on the 'quick' approximation
     # Equivalent to x * sigmoid(1.702 * x)
     # Use 2^x instead of e^x results in an additional scale factor of log2(e)
@@ -110,18 +103,11 @@ def gelu_quick_kernel(x):
 
 
 @libentry()
-# @triton.autotune(configs=[
-#     triton.Config(kwargs={'BLOCK_SIZE': 128}, num_warps=4),
-#     triton.Config(kwargs={'BLOCK_SIZE': 1024}, num_warps=8),
-#     triton.Config(kwargs={'BLOCK_SIZE': 1024}, num_warps=16),
-#   ],
-#   key=['D', 'num_tokens']
-# )
 @triton.jit
 def act_and_mul_kernel(
     out_ptr,  # Output pointer (flattened tensor)
     input_ptr,  # Input pointer (flattened tensor)
-    D: tl.constexpr,  # Dimension size
+    d: int,  # Dimension size
     BLOCK_SIZE: tl.constexpr,  # Block size (threads per block)
     ACTIVATION_TYPE: tl.constexpr, 
     USE_INT64: tl.constexpr,
@@ -132,16 +118,16 @@ def act_and_mul_kernel(
     block_start = tl.arange(0, BLOCK_SIZE)  # Create a range of BLOCK_SIZE elements
 
     # Precompute common base pointers outside the loop for efficiency
-    input_base_ptr1 = input_ptr + token_id * 2 * D
-    input_base_ptr2 = input_ptr + token_id * 2 * D + D
-    out_ptr_base = out_ptr + token_id * D
+    input_base_ptr1 = input_ptr + token_id * 2 * d
+    input_base_ptr2 = input_ptr + token_id * 2 * d + d
+    out_ptr_base = out_ptr + token_id * d
 
     # Iterate over all blocks in the dimension to process all elements
-    for i in range(0, D, BLOCK_SIZE):
+    for i in range(0, d, BLOCK_SIZE):
         block_id = block_start + i
 
         # Mask to ensure we do not read/write out of bounds
-        mask = block_id < D
+        mask = block_id < d
 
         # Calculate pointers for the two parts of the input: input and gating values
         input_ptr1 = input_base_ptr1 + block_id  # First half (input values)
@@ -152,11 +138,11 @@ def act_and_mul_kernel(
 
         # Apply the selected activation function on input_vals
         if ACTIVATION_TYPE == SILU_FUNC_TYPE:
-            activated_vals = silu_kernel(input_vals)
+            activated_vals = _silu_kernel(input_vals)
         elif ACTIVATION_TYPE == GELU_FUNC_TYPE:
-            activated_vals = gelu_kernel(input_vals)
+            activated_vals = _gelu_kernel(input_vals)
         elif ACTIVATION_TYPE == GELU_TANH_FUNC_TYPE:
-            activated_vals = gelu_tanh_kernel(input_vals)
+            activated_vals = _gelu_tanh_kernel(input_vals)
         else:
             activated_vals = input_vals  # No activation if the type is unknown
 
@@ -183,7 +169,7 @@ def launch_activation_and_mul(out: torch.Tensor, input: torch.Tensor, activation
     num_tokens: int = input.numel() // input.shape[-1]  # Number of tokens
 
     # Define block size (maximum threads per block is typically 1024 in Triton)
-    BLOCK_SIZE: int = min(d, 1024)
+    BLOCK_SIZE: int = min(triton.next_power_of_2(d), 1024)
 
     # Check if we need to use int64 for indexing.
     use_int64 = input.numel() > 2**31 - 1
@@ -246,7 +232,7 @@ def gelu_tanh_and_mul(out: torch.Tensor, input: torch.Tensor) -> None:
 def activation_kernel(
     out_ptr,  # Output pointer (flattened tensor)
     input_ptr,  # Input pointer (flattened tensor)
-    D: tl.constexpr,  # Dimension size
+    d: int,  # Dimension size
     BLOCK_SIZE: tl.constexpr,  # Block size (threads per block)
     ACTIVATION_TYPE: tl.constexpr,
     USE_INT64: tl.constexpr,
@@ -257,15 +243,15 @@ def activation_kernel(
     block_start = tl.arange(0, BLOCK_SIZE)  # Create a range of BLOCK_SIZE elements
 
     # Precompute base pointers for efficiency
-    input_base_ptr = input_ptr + token_id * D
-    out_ptr_base = out_ptr + token_id * D
+    input_base_ptr = input_ptr + token_id * d
+    out_ptr_base = out_ptr + token_id * d
 
     # Iterate over all blocks in the dimension to process all elements
-    for i in range(0, D, BLOCK_SIZE):
+    for i in range(0, d, BLOCK_SIZE):
         block_id = block_start + i
 
         # Mask to ensure we do not read/write out of bounds
-        mask = block_id < D
+        mask = block_id < d
 
         # Calculate pointers for the input and output
         input_ptr_curr = input_base_ptr + block_id  # Input values
@@ -275,11 +261,11 @@ def activation_kernel(
 
         # Apply the selected activation function on input_vals
         if ACTIVATION_TYPE == GELU_NEW_FUNC_TYPE:
-            activated_vals = gelu_new_kernel(input_vals)
+            activated_vals = _gelu_new_kernel(input_vals)
         elif ACTIVATION_TYPE == GELU_FAST_FUNC_TYPE:
-            activated_vals = gelu_fast_kernel(input_vals)
+            activated_vals = _gelu_fast_kernel(input_vals)
         elif ACTIVATION_TYPE == GELU_QUICK_FUNC_TYPE:
-            activated_vals = gelu_quick_kernel(input_vals)
+            activated_vals = _gelu_quick_kernel(input_vals)
         else:
             activated_vals = input_vals  # No activation if the type is unknown
 
@@ -301,7 +287,7 @@ def launch_activation_kernel(out: torch.Tensor, input: torch.Tensor, activation_
     num_tokens: int = input.numel() // input.shape[-1]  # Number of tokens
 
     # Define block size (maximum threads per block is typically 1024 in Triton)
-    BLOCK_SIZE: int = min(d, 1024)
+    BLOCK_SIZE: int = min(triton.next_power_of_2(d), 1024)
 
     # Check if we need to use int64 for indexing.
     use_int64 = input.numel() > 2**31 - 1
@@ -364,7 +350,6 @@ def rms_norm_kernel(
     weight_ptr, 
     hidden_size,
     epsilon, 
-    PADDED_HIDDEN_SIZE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr
 ):
     # Compute block and thread indices
@@ -375,7 +360,7 @@ def rms_norm_kernel(
     sum_squares = tl.zeros((), dtype=tl.float32)  # Accumulate as a scalar
 
     # Loop over chunks of the hidden_size
-    for offset in range(0, PADDED_HIDDEN_SIZE, BLOCK_SIZE):
+    for offset in range(0, hidden_size, BLOCK_SIZE):
         current_idx = idx + offset
         mask = current_idx < hidden_size
 
@@ -391,7 +376,7 @@ def rms_norm_kernel(
     norm_factor = tl.rsqrt(variance + epsilon)
 
     # Loop again to normalize and apply weight
-    for offset in range(0, PADDED_HIDDEN_SIZE, BLOCK_SIZE):
+    for offset in range(0, hidden_size, BLOCK_SIZE):
         current_idx = idx + offset
         mask = current_idx < hidden_size
 
@@ -412,21 +397,20 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor, epsil
     num_tokens, hidden_size = input.shape
 
     # Define the grid/block size for Triton
-    padded_hidden_size = triton.next_power_of_2(hidden_size)
-    BLOCK_SIZE = min(padded_hidden_size, 1024)  # A fixed block size for processing chunks of hidden_size
+    BLOCK_SIZE = min(triton.next_power_of_2(hidden_size), 1024)  # A fixed block size for processing chunks of hidden_size
     grid = (num_tokens,)
 
     # Launch the kernel
     device = torch.cuda.device_of(input)
     with torch.cuda.device(device):
-        rms_norm_kernel[grid](out, input, weight, hidden_size, epsilon, padded_hidden_size, BLOCK_SIZE)
+        rms_norm_kernel[grid](out, input, weight, hidden_size, epsilon, BLOCK_SIZE)
 
 
 @libentry()
 @triton.jit(do_not_specialize=["epsilon"])
 def fused_add_rms_norm_kernel(
     input_ptr, residual_ptr, weight_ptr, 
-    hidden_size, epsilon, PADDED_HIDDEN_SIZE: tl.constexpr, BLOCK_SIZE: tl.constexpr
+    hidden_size, epsilon, BLOCK_SIZE: tl.constexpr
 ):
     # Block and thread indexing
     block_id = tl.program_id(0)  # Each block handles one token
@@ -436,7 +420,7 @@ def fused_add_rms_norm_kernel(
     sum_squares = tl.zeros((), dtype=tl.float32)
 
     # First pass: Compute sum of squares and fuse addition
-    for offset in range(0, PADDED_HIDDEN_SIZE, BLOCK_SIZE):
+    for offset in range(0, hidden_size, BLOCK_SIZE):
         current_idx = idx + offset
         mask = current_idx < hidden_size
 
@@ -455,7 +439,7 @@ def fused_add_rms_norm_kernel(
     norm_factor = tl.rsqrt(variance + epsilon)
 
     # Second pass: Apply normalization and weight
-    for offset in range(0, PADDED_HIDDEN_SIZE, BLOCK_SIZE):
+    for offset in range(0, hidden_size, BLOCK_SIZE):
         current_idx = idx + offset
         mask = current_idx < hidden_size
 
@@ -474,20 +458,17 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor, weight: torc
     num_tokens, hidden_size = input.shape
 
     # Define grid and block size
-    padded_hidden_size = triton.next_power_of_2(hidden_size)
-    BLOCK_SIZE = min(padded_hidden_size, 1024)
+    BLOCK_SIZE = min(triton.next_power_of_2(hidden_size), 1024)
     grid = (num_tokens,)
 
     # Launch the kernel
     device = torch.cuda.device_of(input)
     with torch.cuda.device(device):
         fused_add_rms_norm_kernel[grid](
-            input, residual, weight, hidden_size, epsilon, 
-            padded_hidden_size, BLOCK_SIZE
+            input, residual, weight, hidden_size, epsilon, BLOCK_SIZE
         )
 
 
-@libentry()
 @triton.jit
 def _apply_rotary_embedding_kernel(
     query_ptr,         # [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size] 
@@ -577,7 +558,7 @@ def _apply_rotary_embedding_kernel(
 
 @libentry()
 @triton.jit
-def _rotary_embedding_kernel(
+def rotary_embedding_kernel(
     positions_ptr,      # [batch_size, seq_len] or [num_tokens]
     query_ptr,         # [batch_size, seq_len, num_heads * head_size] or [num_tokens, num_heads * head_size] 
     key_ptr,          # [batch_size, seq_len, num_kv_heads * head_size] or [num_tokens, num_kv_heads * head_size]
@@ -643,7 +624,7 @@ def rotary_embedding(
     
     # Launch kernel
     grid = (num_tokens,)
-    _rotary_embedding_kernel[grid](
+    rotary_embedding_kernel[grid](
         positions, 
         query,
         key,
@@ -662,7 +643,7 @@ def rotary_embedding(
 
 @libentry()
 @triton.jit
-def _batched_rotary_embedding_kernel(
+def batched_rotary_embedding_kernel(
     # Pointers to matrices
     positions_ptr,         # [num_tokens]
     query_ptr,            # [num_tokens, num_heads, head_size]
@@ -735,7 +716,7 @@ def batched_rotary_embedding(
     # Match CUDA implementation's grid configuration: dim3(num_tokens)
     grid = (num_tokens,)
     
-    _batched_rotary_embedding_kernel[grid](
+    batched_rotary_embedding_kernel[grid](
         positions, 
         query,
         key,
@@ -754,7 +735,7 @@ def batched_rotary_embedding(
 
 
 @triton.jit
-def float_to_int8_rn(x: tl.tensor) -> tl.tensor:
+def _float_to_int8_rn(x: tl.tensor) -> tl.tensor:
     """
     Convert float to int8 with round-to-nearest-even behavior using CUDA libdevice.
     
@@ -785,7 +766,7 @@ def float_to_int8_rn(x: tl.tensor) -> tl.tensor:
 
 
 @triton.jit
-def float_to_int32_rn(x: tl.tensor) -> tl.tensor:
+def _float_to_int32_rn(x: tl.tensor) -> tl.tensor:
     """
     Convert float to int32 with round-to-nearest-even behavior using CUDA libdevice.
     
@@ -817,7 +798,7 @@ def float_to_int32_rn(x: tl.tensor) -> tl.tensor:
     return result
 
 @triton.jit
-def int32_to_int8(x: tl.tensor) -> tl.tensor:
+def _int32_to_int8(x: tl.tensor) -> tl.tensor:
     # Define int8 min/max constants
     I8_MIN = -128
     I8_MAX = 127
@@ -885,11 +866,11 @@ def static_scaled_int8_quant_kernel(
         # Add zero point if provided
         if azp_ptr is not None:
             # Round to nearest integer and add zero point
-            x = float_to_int32_rn(x) + azp
-            x = int32_to_int8(x)
+            x = _float_to_int32_rn(x) + azp
+            x = _int32_to_int8(x)
         else:
             # Round to nearest integer
-            x = float_to_int8_rn(x)
+            x = _float_to_int8_rn(x)
             
         # Store result
         tl.store(output_ptr + curr_offs, x, mask=curr_mask)
@@ -955,9 +936,6 @@ def dynamic_scaled_int8_quant_kernel(
     # 加载数据并计算最大绝对值
     max_val = tl.cast(float('-inf'), tl.float32)
     for start_idx in range(0, hidden_size, BLOCK_SIZE):
-        # 处理边界情况
-        valid_count = min(BLOCK_SIZE, hidden_size - start_idx)
-        
         # 加载输入数据
         offset = token_offset + start_idx
         mask = offset < max_token_offset
@@ -983,7 +961,7 @@ def dynamic_scaled_int8_quant_kernel(
         
         # 量化到int8
         x_scaled = x * scale_recip
-        x_int8 = float_to_int8_rn(x_scaled)
+        x_int8 = _float_to_int8_rn(x_scaled)
         
         tl.store(output_ptr + offset, x_int8, mask=mask)
 
@@ -1006,7 +984,6 @@ def dynamic_scaled_int8_azp_quant_kernel(
     max_val = tl.cast(float('-inf'), tl.float32)
     
     for start_idx in range(0, hidden_size, BLOCK_SIZE):
-        valid_count = min(BLOCK_SIZE, hidden_size - start_idx)
         offset = token_offset + start_idx
         mask = offset < max_token_offset
         x = tl.load(input_ptr + offset, mask=mask)
@@ -1034,8 +1011,8 @@ def dynamic_scaled_int8_azp_quant_kernel(
         x = (x / scale).to(tl.float32)
         
         # Round to nearest integer and add zero point
-        x_int32 = float_to_int32_rn(x) + azp
-        x_int8 = int32_to_int8(x_int32)
+        x_int32 = _float_to_int32_rn(x) + azp
+        x_int8 = _int32_to_int8(x_int32)
 
         tl.store(output_ptr + offset, x_int8, mask=mask)
 
