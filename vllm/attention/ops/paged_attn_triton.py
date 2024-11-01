@@ -13,21 +13,16 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-"""
 
 # TODO add SiOrigin License
 """
-SiOrigin
-"""
-
-import torch
-import triton
-import triton.language as tl
 
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 import torch
+import triton
+import triton.language as tl
 
 from vllm import _custom_ops as ops
 from vllm.triton_utils import HAS_TRITON
@@ -215,81 +210,26 @@ class PagedAttention:
     ) -> None:
         key_caches = [kv_cache[0] for kv_cache in kv_caches]
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
+        # TODO: how to implement this in triton?
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
 
-# # Define the Triton kernel
-# @triton.jit
-# def copy_blocks_kernel(key_caches, value_caches, block_mapping, numel_per_block, numel_per_layer, BLOCK_SIZE: tl.constexpr):
-#     layer_idx = tl.program_id(0)  # blockIdx.x equivalent
-#     pair_idx = tl.program_id(1)   # blockIdx.y equivalent
-
-#     # Load source and destination block numbers
-#     src_block_number = tl.load(block_mapping + pair_idx * 2)
-#     dst_block_number = tl.load(block_mapping + pair_idx * 2 + 1)
-
-#     # Calculate offsets in the source and destination
-#     src_block_offset = layer_idx * numel_per_layer + src_block_number * numel_per_block
-#     dst_block_offset = layer_idx * numel_per_layer + dst_block_number * numel_per_block
-
-#     # Loop to handle cases where BLOCK_SIZE is smaller than numel_per_block
-#     for offset in range(0, numel_per_block, BLOCK_SIZE):
-#         # Create an index for this thread to work on
-#         idx = tl.arange(0, BLOCK_SIZE) + offset
-
-#         # Bounds check (in case numel_per_block isn't perfectly divisible)
-#         mask = idx < numel_per_block
-
-#         # Copy key_cache from src to dst
-#         src_offset = src_block_offset + idx
-#         dst_offset = dst_block_offset + idx
-
-#         key_cache_val = tl.load(key_caches + src_offset, mask=mask)
-#         tl.store(key_caches + dst_offset, key_cache_val, mask=mask)
-
-#         # Copy value_cache from src to dst
-#         value_cache_val = tl.load(value_caches + src_offset, mask=mask)
-#         tl.store(value_caches + dst_offset, value_cache_val, mask=mask)
-
-# # Function to call the Triton kernel
-# def copy_blocks(key_caches, value_caches, block_mapping):
-#     num_layers = len(key_caches)
-#     if num_layers == 0:
-#         return
-
-#     if num_layers != len(value_caches):
-#         raise ValueError("key_caches and value_caches must have the same number of layers")
-
-#     # Assume all layers are on the same device (could add checks)
-#     cache_device = key_caches[0].device
-
-#     # Concatenate key_caches and value_caches along the first dimension
-#     key_caches_concat = torch.stack(key_caches, dim=0)
-#     value_caches_concat = torch.stack(value_caches, dim=0)
-
-#     num_pairs = block_mapping.size(0)
-#     numel_per_block = key_caches[0][0].numel()
-#     numel_per_layer = key_caches[0].numel()
-
-#     # Define grid/block size
-#     BLOCK_SIZE = min(1024, numel_per_block)
-#     grid = (num_layers, num_pairs)
-
-#     # Launch the Triton kernel
-#     copy_blocks_kernel[grid](key_caches_concat, value_caches_concat, block_mapping, numel_per_block, numel_per_layer, BLOCK_SIZE)
-
 @torch.library.custom_op("torch::swap_blocks",
-                         mutates_args=["dst"], device_types="cuda")
-def swap_blocks(src: torch.Tensor, dst: torch.Tensor, block_mapping: torch.Tensor) -> None:
+                         mutates_args=["dst"],
+                         device_types="cuda")
+def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
+                block_mapping: torch.Tensor) -> None:
     """
-    Copy blocks of data from `src` tensor to `dst` tensor based on the `block_mapping`.
-    Supports copying between different devices (CPU <-> GPU) and uses non_blocking for asynchronous operations when possible.
+    Copy blocks of data from `src` tensor to `dst` tensor based on the
+    `block_mapping`. Supports copying between different devices (CPU <-> GPU)
+    and uses non_blocking for asynchronous operations when possible.
 
     Args:
         src (torch.Tensor): Source tensor.
         dst (torch.Tensor): Destination tensor.
-        block_mapping (torch.Tensor): Tensor of shape (N, 2) where N is the number of block mappings.
-                                      Each row specifies (src_block_idx, dst_block_idx).
+        block_mapping (torch.Tensor): Tensor of shape (N, 2). Where N is the
+                                      number of block mappings. Each row
+                                      specifies (src_block_idx, dst_block_idx).
     """
     # Ensure block_mapping is on the CPU
     if block_mapping.device != torch.device('cpu'):
@@ -297,7 +237,8 @@ def swap_blocks(src: torch.Tensor, dst: torch.Tensor, block_mapping: torch.Tenso
 
     # Ensure src and dst have compatible shapes for copying
     if src.size() != dst.size():
-        raise ValueError("Source and destination tensors must have compatible shapes.")
+        raise ValueError(
+            "Source and destination tensors must have compatible shapes.")
 
     # Iterate over block mappings and copy data from src to dst
     num_blocks = block_mapping.size(0)
@@ -308,22 +249,33 @@ def swap_blocks(src: torch.Tensor, dst: torch.Tensor, block_mapping: torch.Tenso
         # Get the source block
         src_block = src[src_block_number]
 
-        # Perform the block copy with non_blocking=True for async operation if on different devices
-        dst[dst_block_number].copy_(src_block, non_blocking=True if src.device != dst.device else False)
+        # Perform the block copy with non_blocking=True
+        # for async operation if on different devices
+        dst[dst_block_number].copy_(src_block,
+                                    non_blocking=src.device != dst.device)
     if src.device != dst.device:
         torch.cuda.synchronize()
 
 
 @triton.jit
 def reshape_and_cache_kernel(
-    key_ptr, value_ptr, 
-    key_cache_ptr, # [num_blocks, num_heads, head_size/x, block_size, x]
-    value_cache_ptr, # [num_blocks, num_heads, head_size, block_size]
-    slot_mapping_ptr, num_heads, head_size, block_size, x, k_scale, v_scale,
-    stride_key, stride_value, n, BLOCK_SIZE: tl.constexpr
-):
+        key_ptr,
+        value_ptr,
+        key_cache_ptr,  # [num_blocks, num_heads, head_size/x, block_size, x]
+        value_cache_ptr,  # [num_blocks, num_heads, head_size, block_size]
+        slot_mapping_ptr,
+        num_heads,
+        head_size,
+        block_size,
+        x,
+        k_scale,
+        v_scale,
+        stride_key,
+        stride_value,
+        n,
+        BLOCK_SIZE: tl.constexpr):
     token_idx = tl.program_id(0)
-    
+
     # Load slot mapping
     slot_idx = tl.load(slot_mapping_ptr + token_idx)
     if slot_idx < 0:
@@ -352,12 +304,15 @@ def reshape_and_cache_kernel(
         x_idx = head_offset // x
         x_offset = head_offset % x
 
-        tgt_key_idx = block_idx * num_heads * (head_size // x) * block_size * x + \
-                      head_idx * (head_size // x) * block_size * x + \
-                      x_idx * block_size * x + block_offset * x + x_offset
+        tgt_key_idx = block_idx * num_heads * (head_size // x) * \
+            block_size * x + \
+            head_idx * (head_size // x) * block_size * x + \
+            x_idx * block_size * x + \
+            block_offset * x + x_offset
 
         tgt_value_idx = block_idx * num_heads * head_size * block_size + \
-                        head_idx * head_size * block_size + head_offset * block_size + \
+                        head_idx * head_size * block_size + \
+                        head_offset * block_size + \
                         block_offset
 
         # Write the scaled results to key_cache and value_cache
@@ -365,10 +320,10 @@ def reshape_and_cache_kernel(
         tl.store(value_cache_ptr + tgt_value_idx, values * v_scale, mask=mask)
 
 
-def reshape_and_cache(
-    key: torch.Tensor, value: torch.Tensor, key_cache: torch.Tensor, value_cache: torch.Tensor,
-    slot_mapping: torch.Tensor, kv_cache_dtype: str, k_scale: float, v_scale: float
-):
+def reshape_and_cache(key: torch.Tensor, value: torch.Tensor,
+                      key_cache: torch.Tensor, value_cache: torch.Tensor,
+                      slot_mapping: torch.Tensor, kv_cache_dtype: str,
+                      k_scale: float, v_scale: float):
     assert kv_cache_dtype != "fp8", "Currently not support fp8"
     # Parameters extraction
     num_tokens = key.shape[0]
@@ -382,29 +337,41 @@ def reshape_and_cache(
     n = num_heads * head_size
 
     # Define grid size and block size
-    grid = (num_tokens,)
+    grid = (num_tokens, )
     block = min(512, n)
 
     # Launch Triton kernel
-    reshape_and_cache_kernel[grid](
-        key_ptr=key, value_ptr=value,
-        key_cache_ptr=key_cache, value_cache_ptr=value_cache,
-        slot_mapping_ptr=slot_mapping,
-        num_heads=num_heads, head_size=head_size, block_size=block_size, x=x,
-        k_scale=k_scale, v_scale=v_scale,
-        stride_key=stride_key, stride_value=stride_value, n=n, BLOCK_SIZE=block
-    )
+    reshape_and_cache_kernel[grid](key_ptr=key,
+                                   value_ptr=value,
+                                   key_cache_ptr=key_cache,
+                                   value_cache_ptr=value_cache,
+                                   slot_mapping_ptr=slot_mapping,
+                                   num_heads=num_heads,
+                                   head_size=head_size,
+                                   block_size=block_size,
+                                   x=x,
+                                   k_scale=k_scale,
+                                   v_scale=v_scale,
+                                   stride_key=stride_key,
+                                   stride_value=stride_value,
+                                   n=n,
+                                   BLOCK_SIZE=block)
 
 
 # Requires triton >= 2.2.0
 # TODO add FP8 support
 @torch.library.custom_op("triton::paged_attention",
-                         mutates_args=["out"], device_types="cuda")
+                         mutates_args=["out"],
+                         device_types="cuda")
 def paged_attention(
-    out: torch.Tensor,  # [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE, HEAD_SIZE]
-    query: torch.Tensor,  # [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE, HEAD_SIZE]
-    key_cache: torch.Tensor,  # [num_blocks, NUM_KV_HEADS, HEAD_SIZE/x, KV_BLOCK_SIZE, x]
-    value_cache: torch.Tensor,  # [num_blocks, NUM_KV_HEADS, HEAD_SIZE, KV_BLOCK_SIZE]
+    out: torch.
+    Tensor,  # [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE, HEAD_SIZE]
+    query: torch.
+    Tensor,  # [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE, HEAD_SIZE]
+    key_cache: torch.
+    Tensor,  # [num_blocks, NUM_KV_HEADS, HEAD_SIZE/x, KV_BLOCK_SIZE, x]
+    value_cache: torch.
+    Tensor,  # [num_blocks, NUM_KV_HEADS, HEAD_SIZE, KV_BLOCK_SIZE]
     num_kv_heads: int,
     attn_scale: float,
     block_tables: torch.Tensor,  # [num_seqs, max_num_blocks_per_seq]
@@ -412,13 +379,13 @@ def paged_attention(
     kv_block_size: int,
     max_context_len: int,
     alibi_slopes: Optional[torch.Tensor],
-    kv_cache_dtype: Optional[str] = None, # TODO, support fp8
-    k_scale: float = 1.0, # TODO, support fp8
-    v_scale: float = 1.0, # TODO, support fp8
+    kv_cache_dtype: Optional[str] = None,  # TODO, support fp8
+    k_scale: float = 1.0,  # TODO, support fp8
+    v_scale: float = 1.0,  # TODO, support fp8
     num_splits: int = 0,
 ) -> None:
-    # assert alibi_slopes is None, "alibi_slopes is not supported now"
-    assert kv_cache_dtype == "auto", "kv_cache_dtype for fp8 is not supported now"
+    assert (kv_cache_dtype == "auto") \
+        , "kv_cache_dtype for fp8 is not supported now"
 
     num_seqs = query.shape[0]
     num_heads = query.shape[1]
@@ -435,10 +402,8 @@ def paged_attention(
     else:
         padded_group_size = triton.next_power_of_2(query_group_size)
 
-    # assert head_size in (16, 32, 64, 128, 256, 512), f"kv_head_size={head_size}"
-    assert padded_group_size == 1 or kv_block_size >= 16, f"kv_block_size={kv_block_size}"
-    # query_group_size in (1, 2, 4, 8, 16, 32, 64, 128, 256)
-    # assert query_group_size > 0 and query_group_size & (query_group_size-1) == 0, f"query_group_size={query_group_size}"
+    assert (padded_group_size == 1
+            or kv_block_size >= 16), f"kv_block_size={kv_block_size}"
 
     # config for A100
     # TODO: support more devices and optimize
@@ -523,8 +488,9 @@ def paged_attention(
                 device=out.device,
             )
 
-            assert (partition_size >= kv_block_size) and (partition_size % kv_block_size == 0), \
-                f"partition_size={partition_size}, kv_block_size={kv_block_size}"
+            assert (partition_size >= kv_block_size) and (
+                partition_size % kv_block_size == 0
+            ), f"partition_size={partition_size}, kv_block_size={kv_block_size}"
             _paged_attn_kernel[grid](
                 m_i,
                 l_i,
@@ -616,27 +582,26 @@ def get_num_stages(PARTITION_SIZE, KV_BLOCK_SIZE):
             return 1
 
 
-@triton.heuristics(
-    {
-        "num_warps": lambda args: get_num_warps(
-            args["QUERY_GROUP_SIZE"], args["HEAD_SIZE"], args["KV_BLOCK_SIZE"]
-        ),
-        "num_stages": lambda args: get_num_stages(
-            args["QUERY_GROUP_SIZE"], args["KV_BLOCK_SIZE"]
-        ),
-    }
-)
+@triton.heuristics({
+    "num_warps":
+    lambda args: get_num_warps(args["QUERY_GROUP_SIZE"], args["HEAD_SIZE"],
+                               args["KV_BLOCK_SIZE"]),
+    "num_stages":
+    lambda args: get_num_stages(args["QUERY_GROUP_SIZE"], args["KV_BLOCK_SIZE"]
+                                ),
+})
 @triton.jit
 def _paged_attn_kernel(
     m_i_ptr,  # [num_seqs, NUM_KV_HEADS, max_num_partitions, QUERY_GROUP_SIZE]
     l_i_ptr,  # [num_seqs, NUM_KV_HEADS, max_num_partitions, QUERY_GROUP_SIZE]
-    out_ptr,  # [num_seqs, NUM_KV_HEADS, max_num_partitions, QUERY_GROUP_SIZE, HEAD_SIZE]
+    out_ptr,  # [num_seqs, NUM_KV_HEADS, max_num_partitions, 
+    # QUERY_GROUP_SIZE, HEAD_SIZE]
     q_ptr,  # [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE, HEAD_SIZE]
     k_cache_ptr,  # [num_blocks, NUM_KV_HEADS, HEAD_SIZE/x, KV_BLOCK_SIZE, x]
     v_cache_ptr,  # [num_blocks, NUM_KV_HEADS, HEAD_SIZE, KV_BLOCK_SIZE]
     context_lens_ptr,  # [num_seqs]
     block_tables_ptr,  # [num_seqs, max_num_blocks_per_seq]
-    alibi_slopes_ptr, # [HEAD_SIZE]
+    alibi_slopes_ptr,  # [HEAD_SIZE]
     attn_scale,
     stride_b_loc_b,
     stride_b_loc_s,
@@ -685,8 +650,10 @@ def _paged_attn_kernel(
         context_start_idx = part_idx * PARTITION_SIZE
         if context_start_idx >= context_len:
             return
-        context_end_idx = tl.minimum(context_start_idx + PARTITION_SIZE, context_len)
-        num_blocks = tl.cdiv(context_end_idx - context_start_idx, KV_BLOCK_SIZE)
+        context_end_idx = tl.minimum(context_start_idx + PARTITION_SIZE,
+                                     context_len)
+        num_blocks = tl.cdiv(context_end_idx - context_start_idx,
+                             KV_BLOCK_SIZE)
     else:
         num_blocks = tl.cdiv(context_len, KV_BLOCK_SIZE)
 
@@ -695,47 +662,44 @@ def _paged_attn_kernel(
     padding_group_offset = tl.arange(0, PADDED_QUERY_GROUP_SIZE)
 
     # [HEAD_SIZE, KV_BLOCK_SIZE]
-    k_offset = (
-        kv_head_idx * stride_k_cache_h
-        + (head_offset[:, None] // X) * stride_k_cache_d 
-        + block_offset[None, :] * stride_k_cache_bl
-        + (head_offset[:, None] % X) * stride_k_cache_x 
-    ) 
-    
+    k_offset = (kv_head_idx * stride_k_cache_h +
+                (head_offset[:, None] // X) * stride_k_cache_d +
+                block_offset[None, :] * stride_k_cache_bl +
+                (head_offset[:, None] % X) * stride_k_cache_x)
+
     # [KV_BLOCK_SIZE, HEAD_SIZE]
-    v_offset = (
-        kv_head_idx * stride_v_cache_h
-        + head_offset[None, :] * stride_v_cache_d
-        + block_offset[:, None] * stride_v_cache_bl
-    )
+    v_offset = (kv_head_idx * stride_v_cache_h +
+                head_offset[None, :] * stride_v_cache_d +
+                block_offset[:, None] * stride_v_cache_bl)
 
     # Load queries.
     # [PADDED_QUERY_GROUP_SIZE, HEAD_SIZE]
-    q_offset = (
-        seq_idx * stride_qbs
-        + (head_idx + padding_group_offset[:, None]) * stride_qh
-        + head_offset[None, :] * stride_qd
-    )
-    dim_mask = tl.where(
-        head_offset < HEAD_SIZE, 1,
-        0).to(tl.int1)  # [D]
+    q_offset = (seq_idx * stride_qbs +
+                (head_idx + padding_group_offset[:, None]) * stride_qh +
+                head_offset[None, :] * stride_qd)
+    dim_mask = tl.where(head_offset < HEAD_SIZE, 1, 0).to(tl.int1)  # [D]
     group_mask = padding_group_offset[:, None] < QUERY_GROUP_SIZE
     # q: [PADDED_QUERY_GROUP_SIZE, HEAD_SIZE]
-    q = tl.load(q_ptr + q_offset, mask=dim_mask[None, :] & group_mask, other=0.0)
+    q = tl.load(q_ptr + q_offset,
+                mask=dim_mask[None, :] & group_mask,
+                other=0.0)
 
     if USE_ALIBI_POSITION_ENCODING:
-        alibi_slopes = tl.load(alibi_slopes_ptr + head_idx + padding_group_offset[:, None], mask=group_mask, other=0.0)
+        alibi_slopes = tl.load(alibi_slopes_ptr + head_idx +
+                               padding_group_offset[:, None],
+                               mask=group_mask,
+                               other=0.0)
 
     m_i = tl.full([PADDED_QUERY_GROUP_SIZE], -float("inf"), dtype=tl.float32)
     l_i = tl.zeros([PADDED_QUERY_GROUP_SIZE], dtype=tl.float32)
-    acc = tl.zeros([PADDED_QUERY_GROUP_SIZE, PADDED_HEAD_SIZE], dtype=tl.float32)
+    acc = tl.zeros([PADDED_QUERY_GROUP_SIZE, PADDED_HEAD_SIZE],
+                   dtype=tl.float32)
 
     num_prev_blocks = part_idx * (PARTITION_SIZE // KV_BLOCK_SIZE)
     for i in range(num_blocks):
         block_idx = num_prev_blocks + i
-        block_number = tl.load(
-            block_tables_ptr + seq_idx * stride_b_loc_b + block_idx * stride_b_loc_s
-        )
+        block_number = tl.load(block_tables_ptr + seq_idx * stride_b_loc_b +
+                               block_idx * stride_b_loc_s)
 
         # Load a key block.
         k_block_offset = block_number * stride_k_cache_bs + k_offset
@@ -747,7 +711,9 @@ def _paged_attn_kernel(
         # v_mask = mask_offset[:, None] < context_len
 
         # k: [HEAD_SIZE, KV_BLOCK_SIZE]
-        k = tl.load(k_cache_ptr + k_block_offset, mask=dim_mask[:, None] & k_pos_range_mask[None, :], other=0.0)
+        k = tl.load(k_cache_ptr + k_block_offset,
+                    mask=dim_mask[:, None] & k_pos_range_mask[None, :],
+                    other=0.0)
 
         # qk: [PADDED_QUERY_GROUP_SIZE, KV_BLOCK_SIZE]
         if PADDED_QUERY_GROUP_SIZE == 1:
@@ -758,10 +724,10 @@ def _paged_attn_kernel(
         qk *= attn_scale
 
         if USE_ALIBI_POSITION_ENCODING:
-            alibi_bias = (k_pos_range[None, :] - (context_len - 1)) * alibi_slopes
-            alibi_bias = tl.where(
-                k_pos_range_mask & group_mask, alibi_bias, float("-inf")
-            )
+            alibi_bias = (k_pos_range[None, :] -
+                          (context_len - 1)) * alibi_slopes
+            alibi_bias = tl.where(k_pos_range_mask & group_mask, alibi_bias,
+                                  float("-inf"))
             qk += alibi_bias
         else:
             qk = tl.where(k_pos_range_mask, qk, float("-inf"))
@@ -774,7 +740,9 @@ def _paged_attn_kernel(
         acc *= alpha[:, None]
 
         # v: [KV_BLOCK_SIZE, HEAD_SIZE]
-        v = tl.load(v_cache_ptr + v_block_offset, mask=dim_mask[None, :] & k_pos_range_mask[:, None], other=0.0)
+        v = tl.load(v_cache_ptr + v_block_offset,
+                    mask=dim_mask[None, :] & k_pos_range_mask[:, None],
+                    other=0.0)
 
         if PADDED_QUERY_GROUP_SIZE == 1:
             acc += tl.sum(p.T[:, :, None] * v[:, None, :], axis=0)
@@ -787,29 +755,24 @@ def _paged_attn_kernel(
     acc = acc / l_i[:, None]
 
     if USE_PARTITIONING:
-        part_offset = (
-            (seq_idx * NUM_KV_HEADS + kv_head_idx)
-            * max_num_partitions
-            * QUERY_GROUP_SIZE
-            + part_idx * QUERY_GROUP_SIZE
-            + padding_group_offset
-        )
+        part_offset = ((seq_idx * NUM_KV_HEADS + kv_head_idx) *
+                       max_num_partitions * QUERY_GROUP_SIZE +
+                       part_idx * QUERY_GROUP_SIZE + padding_group_offset)
         mask = padding_group_offset < QUERY_GROUP_SIZE
         tl.store(m_i_ptr + part_offset, m_i, mask=mask)
         tl.store(l_i_ptr + part_offset, l_i, mask=mask)
 
     out_offset = seq_idx * stride_o0
     if USE_PARTITIONING:
-        # tmp_out: [num_seqs, NUM_KV_HEADS, max_num_partitions, QUERY_GROUP_SIZE, HEAD_SIZE]
+        # tmp_out: [num_seqs, NUM_KV_HEADS, max_num_partitions,
+        # QUERY_GROUP_SIZE, HEAD_SIZE]
         out_offset += kv_head_idx * stride_o1
     else:
         # out: [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE, HEAD_SIZE]
         out_offset += head_idx * stride_o1
-    out_offset += (
-        part_idx * stride_o2
-        + padding_group_offset[:, None] * stride_o3
-        + head_offset[None, :] * stride_o4
-    )
+    out_offset += (part_idx * stride_o2 +
+                   padding_group_offset[:, None] * stride_o3 +
+                   head_offset[None, :] * stride_o4)
 
     group_mask = padding_group_offset[:, None] < QUERY_GROUP_SIZE
     tl.store(out_ptr + out_offset, acc, mask=dim_mask[None, :] & group_mask)
@@ -820,7 +783,8 @@ def _paged_attn_v2_reduce_kernel(
     out_ptr,  # [num_seqs, NUM_KV_HEADS * QUERY_GROUP_SIZE, HEAD_SIZE]
     m_i_ptr,  # [num_seqs, NUM_KV_HEADS, max_num_partitions, QUERY_GROUP_SIZE]
     l_i_ptr,  # [num_seqs, NUM_KV_HEADS, max_num_partitions, QUERY_GROUP_SIZE]
-    tmp_out_ptr,  # [num_seqs, NUM_KV_HEADS, max_num_partitions, QUERY_GROUP_SIZE, HEAD_SIZE]
+    tmp_out_ptr,  # [num_seqs, NUM_KV_HEADS, max_num_partitions,
+    # QUERY_GROUP_SIZE, HEAD_SIZE]
     context_lens_ptr,  # [num_seqs]
     max_num_partitions,  # partition stride
     stride_obs,
@@ -842,34 +806,27 @@ def _paged_attn_v2_reduce_kernel(
     head_offset = tl.arange(0, PADDED_HEAD_SIZE)
 
     num_partitions = tl.cdiv(context_len, PARTITION_SIZE)
-    group_head_offset = (
-        tl.arange(0, QUERY_GROUP_SIZE)[:, None] * HEAD_SIZE
-        + head_offset[None, :]
-    )
+    group_head_offset = (tl.arange(0, QUERY_GROUP_SIZE)[:, None] * HEAD_SIZE +
+                         head_offset[None, :])
 
-    dim_mask = tl.where(
-        head_offset < HEAD_SIZE, 1,
-        0).to(tl.int1)  # [D]
+    dim_mask = tl.where(head_offset < HEAD_SIZE, 1, 0).to(tl.int1)  # [D]
     if num_partitions == 1:
-        tmp_out_offset = (
-            seq_idx * NUM_KV_HEADS + kv_head_idx
-        ) * max_num_partitions * QUERY_GROUP_SIZE * HEAD_SIZE + group_head_offset
+        tmp_out_offset = ((seq_idx * NUM_KV_HEADS + kv_head_idx) *
+                          max_num_partitions * QUERY_GROUP_SIZE * HEAD_SIZE +
+                          group_head_offset)
         tmp_out = tl.load(tmp_out_ptr + tmp_out_offset, mask=dim_mask[None, :])
 
-        out_offset = (
-            seq_idx * stride_obs
-            + head_idx * stride_oh
-            + group_head_offset * stride_od
-        )
+        out_offset = (seq_idx * stride_obs + head_idx * stride_oh +
+                      group_head_offset * stride_od)
         tl.store(out_ptr + out_offset, tmp_out, mask=dim_mask[None, :])
         return
 
     # Get the global max logit.
     ml_offset = (
-        (seq_idx * NUM_KV_HEADS + kv_head_idx) * max_num_partitions * QUERY_GROUP_SIZE
-        + tl.arange(0, PADDED_NUM_PARTITIONS)[:, None] * QUERY_GROUP_SIZE
-        + tl.arange(0, QUERY_GROUP_SIZE)[None, :]
-    )
+        (seq_idx * NUM_KV_HEADS + kv_head_idx) * max_num_partitions *
+        QUERY_GROUP_SIZE +
+        tl.arange(0, PADDED_NUM_PARTITIONS)[:, None] * QUERY_GROUP_SIZE +
+        tl.arange(0, QUERY_GROUP_SIZE)[None, :])
 
     mask = tl.arange(0, PADDED_NUM_PARTITIONS)[:, None] < num_partitions
     # m_i: [PADDED_NUM_PARTITIONS, QUERY_GROUP_SIZE]
@@ -882,28 +839,24 @@ def _paged_attn_v2_reduce_kernel(
     l_i = tl.load(l_i_ptr + ml_offset, mask=mask, other=0.0)
     l_i *= tl.exp(m_i - m[None, :])
     # l: [QUERY_GROUP_SIZE]
-    l = tl.sum(l_i, axis=0)
+    l = tl.sum(l_i, axis=0)  # noqa: E741
     # r: [PADDED_NUM_PARTITIONS, QUERY_GROUP_SIZE]
     r = l_i / l[None, :]
     r = tl.reshape(r, (PADDED_NUM_PARTITIONS, QUERY_GROUP_SIZE, 1))
 
     tmp_out_offset = (
-        (seq_idx * NUM_KV_HEADS + kv_head_idx)
-        * max_num_partitions
-        * QUERY_GROUP_SIZE
-        * HEAD_SIZE
-        + tl.arange(0, PADDED_NUM_PARTITIONS)[:, None, None] * QUERY_GROUP_SIZE * HEAD_SIZE
-        + tl.arange(0, QUERY_GROUP_SIZE)[None, :, None] * HEAD_SIZE
-        + head_offset[None, None, :]
-    )
+        (seq_idx * NUM_KV_HEADS + kv_head_idx) * max_num_partitions *
+        QUERY_GROUP_SIZE * HEAD_SIZE +
+        tl.arange(0, PADDED_NUM_PARTITIONS)[:, None, None] * QUERY_GROUP_SIZE *
+        HEAD_SIZE + tl.arange(0, QUERY_GROUP_SIZE)[None, :, None] * HEAD_SIZE +
+        head_offset[None, None, :])
     # tmp_out: [PADDED_NUM_PARTITIONS, QUERY_GROUP_SIZE, PADDED_HEAD_SIZE]
-    tmp_out = tl.load(tmp_out_ptr + tmp_out_offset, mask=mask[:, :, None] & dim_mask[None, None, :], other=0.0)
+    tmp_out = tl.load(tmp_out_ptr + tmp_out_offset,
+                      mask=mask[:, :, None] & dim_mask[None, None, :],
+                      other=0.0)
     # out: [QUERY_GROUP_SIZE, PADDED_HEAD_SIZE]
     out = tl.sum((tmp_out * r).to(tl.float32), axis=0)
 
-    out_offset = (
-        seq_idx * stride_obs
-        + head_idx * stride_oh
-        + group_head_offset * stride_od
-    )
+    out_offset = (seq_idx * stride_obs + head_idx * stride_oh +
+                  group_head_offset * stride_od)
     tl.store(out_ptr + out_offset, out, mask=dim_mask[None, :])

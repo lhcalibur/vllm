@@ -6,14 +6,16 @@ import torch
 
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
-from vllm.utils import get_max_shared_memory_bytes, seed_everything
 from vllm.attention.ops.paged_attn_triton import paged_attention
-
+from vllm.utils import get_max_shared_memory_bytes, seed_everything
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 # This will change depending on the compute capability.
 # - 512 as a buffer
-MAX_SEQ_LENS = [2048, 4096, get_max_shared_memory_bytes() // FLOAT32_BYTES - 512]
+MAX_SEQ_LENS = [
+    2048, 4096,
+    get_max_shared_memory_bytes() // FLOAT32_BYTES - 512
+]
 # There may not be enough gpu memory due to large NUM_BLOCKS.
 # Reduce NUM_BLOCKS when it happens.
 NUM_BLOCKS = 4321  # Arbitrary values for testing
@@ -195,10 +197,9 @@ def test_paged_attention(
     )
     opcheck(paged_attention,
             (output, query, key_cache, value_cache, num_kv_heads, scale,
-                block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
-                kv_cache_dtype, k_scale, v_scale),
-            cond=(head_size == HEAD_SIZES[0]
-                    and block_size == BLOCK_SIZES[0]))
+             block_tables, seq_lens, block_size, max_seq_len, alibi_slopes,
+             kv_cache_dtype, k_scale, v_scale),
+            cond=(head_size == HEAD_SIZES[0] and block_size == BLOCK_SIZES[0]))
 
     # Run the reference implementation.
     if kv_cache_dtype == "fp8":

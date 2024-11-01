@@ -29,7 +29,9 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-MULTI_STEP_ATTENTION_BACKENDS = ["flash-attn", "rocm-flash-attn", "flashinfer"]
+MULTI_STEP_ATTENTION_BACKENDS = [
+    "flash-attn", "rocm-flash-attn", "flashinfer", "triton-flash-attn"
+]
 
 
 def seq_output_builder():

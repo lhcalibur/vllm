@@ -8,8 +8,8 @@ import pytest
 import torch
 
 from tests.kernels.utils import opcheck
-from vllm.utils import seed_everything
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.utils import seed_everything
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -61,21 +61,32 @@ def test_rotary_embedding_opcheck(dist_init, seed, device, max_position,
                         device=device)
     key = torch.randn_like(query)
 
-
     raw_query = query.clone()
     raw_key = key.clone()
     ref_query, ref_key = rot.forward_native(positions, raw_query, raw_key)
     rot(positions, query, key)
-    torch.testing.assert_close(query, ref_query, atol=get_default_atol(ref_query), rtol=get_default_rtol(ref_query))
-    torch.testing.assert_close(key, ref_key, atol=get_default_atol(ref_query), rtol=get_default_rtol(ref_query))
+    torch.testing.assert_close(query,
+                               ref_query,
+                               atol=get_default_atol(ref_query),
+                               rtol=get_default_rtol(ref_query))
+    torch.testing.assert_close(key,
+                               ref_key,
+                               atol=get_default_atol(ref_query),
+                               rtol=get_default_rtol(ref_query))
 
-    offsets = torch.randint(0, 
+    offsets = torch.randint(0,
                             max_position, (batch_size * seq_len, ),
                             device=device)
 
     rot(positions, raw_query, raw_key, offsets)
-    torch.testing.assert_close(query, ref_query, atol=get_default_atol(ref_query), rtol=get_default_rtol(ref_query))
-    torch.testing.assert_close(key, ref_key, atol=get_default_atol(ref_query), rtol=get_default_rtol(ref_query))
+    torch.testing.assert_close(query,
+                               ref_query,
+                               atol=get_default_atol(ref_query),
+                               rtol=get_default_rtol(ref_query))
+    torch.testing.assert_close(key,
+                               ref_key,
+                               atol=get_default_atol(ref_query),
+                               rtol=get_default_rtol(ref_query))
 
     rotary_embedding_opcheck(rot, positions, query, key)
     rotary_embedding_opcheck(rot, positions, query, key, offsets)

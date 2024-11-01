@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
+import triton
+import triton.language as tl
 
 import vllm.envs as envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -9,7 +11,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder)
 from vllm.attention.ops.paged_attn_triton import (PagedAttention,
-                                           PagedAttentionMetadata)
+                                                  PagedAttentionMetadata)
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -177,7 +179,6 @@ class TritonFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
         )
         return self._cached_decode_metadata
 
-    # TODO?
     def advance_step(self, model_input: "ModelInputForGPUWithSamplingMetadata",
                      sampled_token_ids: Optional[torch.Tensor],
                      block_size: int, num_seqs: int, num_queries: int):
@@ -221,15 +222,16 @@ class TritonFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
 
-        ops.advance_step_flashattn(num_seqs=num_seqs,
-                                   num_queries=num_queries,
-                                   block_size=block_size,
-                                   input_tokens=model_input.input_tokens,
-                                   sampled_token_ids=sampled_token_ids,
-                                   input_positions=model_input.input_positions,
-                                   seq_lens=self.seq_lens_tensor,
-                                   slot_mapping=self.slot_mapping,
-                                   block_tables=self.block_tables)
+        advance_step_flashattn_triton(
+            num_seqs=num_seqs,
+            num_queries=num_queries,
+            block_size=block_size,
+            input_tokens=model_input.input_tokens,
+            sampled_token_ids=sampled_token_ids,
+            input_positions=model_input.input_positions,
+            seq_lens=self.seq_lens_tensor,
+            slot_mapping=self.slot_mapping,
+            block_tables=self.block_tables)
 
 
 class TritonFlashAttentionMetadataBuilder(
@@ -557,3 +559,149 @@ def _sdpa_attention(
             start = end
 
     return output
+
+
+def verify_tensor(name: str, tensor: torch.Tensor, size_0: Optional[int],
+                  size_1: Optional[int], dtype: torch.dtype) -> None:
+    """
+    Verify tensor properties including shape, contiguity, and data type.
+    
+    Args:
+        name: Tensor name for error messages
+        tensor: Tensor to verify
+        size_0: Expected size of first dimension (-1 for any size)
+        size_1: Expected size of second dimension (-1 for any size)
+        dtype: Expected data type
+    
+    Raises:
+        ValueError: If tensor doesn't meet requirements
+    """
+    # Check first dimension
+    if size_0 != -1 and tensor.size(0) != size_0:
+        raise ValueError(f"Tensor '{name}' has wrong size_0: "
+                         f"expected {size_0}, got {tensor.size(0)}")
+
+    # Check second dimension if tensor is 2D
+    if size_1 != -1:
+        if tensor.dim() < 2:
+            raise ValueError(f"Tensor '{name}' should have at least 2D "
+                             f"but got {tensor.dim()}D")
+        if tensor.size(1) != size_1:
+            raise ValueError(f"Tensor '{name}' has wrong size_1: "
+                             f"expected {size_1}, got {tensor.size(1)}")
+
+    # Check contiguity
+    if not tensor.is_contiguous():
+        raise ValueError(f"Tensor '{name}' must be contiguous")
+
+    # Check data type
+    if tensor.dtype != dtype:
+        raise ValueError(f"Tensor '{name}' has wrong dtype: "
+                         f"expected {dtype}, got {tensor.dtype}")
+
+
+@triton.jit
+def advance_step_kernel(
+    # Pointers to input/output tensors
+    input_tokens_ptr,  # [num_seqs, max_seq_len]
+    sampled_token_ids_ptr,  # [num_queries, 1]
+    input_positions_ptr,  # [num_seqs]
+    seq_lens_ptr,  # [num_seqs]
+    slot_mapping_ptr,  # [num_seqs]
+    block_tables_ptr,  # [max_blocks_per_seq]
+
+    # Scalar values
+    num_queries,
+    block_tables_stride,
+    table_block_size: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    # Get program ID
+    pid = tl.program_id(0)
+
+    query_offsets = pid + tl.arange(0, BLOCK_SIZE)
+    query_masks = query_offsets < num_queries
+
+    # Update input tokens with new sampled token
+    tl.store(input_tokens_ptr + query_offsets,
+             tl.load(sampled_token_ids_ptr + query_offsets, mask=query_masks),
+             mask=query_masks)
+
+    # Load current sequence length
+    seq_len = tl.load(seq_lens_ptr + query_offsets, mask=query_masks)
+
+    # Calculate next sequence position
+    next_seq_len = seq_len + 1
+    next_input_pos = next_seq_len - 1
+
+    # Update sequence length
+    tl.store(seq_lens_ptr + query_offsets, next_seq_len, mask=query_masks)
+
+    # Update input position
+    tl.store(input_positions_ptr + query_offsets,
+             next_input_pos,
+             mask=query_masks)
+
+    # Calculate KV cache slot mapping
+    block_index = next_input_pos // table_block_size
+    block_offset = next_input_pos % table_block_size
+
+    block_tables_ptr_offset = query_offsets * block_tables_stride + block_index
+
+    # Load block table entry and calculate slot number
+    block_table_entry = tl.load(block_tables_ptr + block_tables_ptr_offset,
+                                mask=query_masks)
+    slot_num = block_table_entry * table_block_size + block_offset
+
+    # Store slot mapping
+    tl.store(slot_mapping_ptr + query_offsets, slot_num, mask=query_masks)
+
+
+def advance_step_flashattn_triton(
+    num_seqs: int,
+    num_queries: int,
+    block_size: int,
+    input_tokens: torch.Tensor,
+    sampled_token_ids: torch.Tensor,
+    input_positions: torch.Tensor,
+    seq_lens: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    block_tables: torch.Tensor,
+) -> None:
+    """
+    Triton implementation of advance_step_flashattn with tensor verification
+    """
+    # Verify all input tensors
+    verify_tensor("input_tokens", input_tokens, num_seqs, -1, torch.long)
+    verify_tensor("sampled_token_ids", sampled_token_ids, num_queries, 1,
+                  torch.long)
+    verify_tensor("input_positions", input_positions, num_seqs, -1, torch.long)
+    verify_tensor("seq_lens", seq_lens, num_seqs, -1, torch.int32)
+    verify_tensor("slot_mapping", slot_mapping, num_seqs, -1, torch.long)
+    verify_tensor("block_tables", block_tables, num_seqs, -1, torch.int32)
+
+    # Ensure all tensors are on the same device
+    device = input_tokens.device
+    if not all(t.device == device for t in [
+            sampled_token_ids, input_positions, seq_lens, slot_mapping,
+            block_tables
+    ]):
+        raise ValueError("All tensors must be on the same device")
+
+    # Configure grid and block sizes
+    BLOCK_SIZE = 256
+    grid = (triton.cdiv(num_queries, BLOCK_SIZE), )
+
+    # Launch kernel
+    advance_step_kernel[grid](
+        input_tokens,
+        sampled_token_ids,
+        input_positions,
+        seq_lens,
+        slot_mapping,
+        block_tables,
+        num_queries,
+        block_tables_stride=block_tables.stride(0),
+        table_block_size=block_size,
+        BLOCK_SIZE=BLOCK_SIZE,
+    )

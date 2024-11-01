@@ -3,7 +3,8 @@ import torch
 
 from tests.kernels.quant_utils import ref_dynamic_per_token_quant
 from tests.kernels.utils import opcheck
-from vllm._triton_ops import scaled_int8_quant, static_scaled_int8_quant, dynamic_scaled_int8_quant
+from vllm._triton_ops import (dynamic_scaled_int8_quant, scaled_int8_quant,
+                              static_scaled_int8_quant)
 from vllm.utils import seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
@@ -28,14 +29,12 @@ def opcheck_int8_quant_dynamic(output, input, symmetric=True):
                         device=input.device,
                         dtype=torch.float32)
     if symmetric:
-        opcheck(dynamic_scaled_int8_quant,
-                (output, input, scale, None))
+        opcheck(dynamic_scaled_int8_quant, (output, input, scale, None))
     else:
         azp = torch.empty((input.numel() // input.shape[-1], 1),
                           device=input.device,
                           dtype=torch.int32)
-        opcheck(dynamic_scaled_int8_quant,
-                (output, input, scale, azp))
+        opcheck(dynamic_scaled_int8_quant, (output, input, scale, azp))
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)

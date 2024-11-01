@@ -3,12 +3,11 @@ from typing import Type
 import pytest
 import torch
 
-from tests.kernels.utils import opcheck
+from vllm import _triton_ops as ops
 from vllm.model_executor.layers.activation import (FastGELU, GeluAndMul,
                                                    NewGELU, QuickGELU,
                                                    SiluAndMul)
 from vllm.utils import seed_everything
-from vllm import _triton_ops as ops
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -41,13 +40,10 @@ def test_act_and_mul(
     x = torch.randn(num_tokens, 2 * d, dtype=dtype)
     if activation == "silu":
         layer = SiluAndMul()
-        fn = ops.silu_and_mul
     elif activation == "gelu":
         layer = GeluAndMul(approximate="none")
-        fn = ops.gelu_and_mul
     elif activation == "gelu_tanh":
         layer = GeluAndMul(approximate="tanh")
-        fn = ops.gelu_tanh_and_mul
     out = layer.forward_triton(x)
 
     # Prevent assert_close from OOM
@@ -56,15 +52,11 @@ def test_act_and_mul(
         ref_out = layer.forward_cuda(x).cpu()
     else:
         ref_out = layer.forward_native(x)
-    
-    torch.testing.assert_close(out, ref_out,
+
+    torch.testing.assert_close(out,
+                               ref_out,
                                atol=get_default_atol(out),
                                rtol=get_default_rtol(out))
-
-    # d = x.shape[-1] // 2
-    # output_shape = (x.shape[:-1] + (d, ))
-    # out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-    # opcheck(fn, (out, x))
 
 
 @pytest.mark.parametrize("activation", [(FastGELU, ops.gelu_fast),
@@ -88,13 +80,9 @@ def test_activation(
     torch.set_default_device(device)
     x = torch.randn(num_tokens, d, dtype=dtype)
     layer = activation[0]()
-    fn = activation[1]
     out = layer.forward_triton(x)
     ref_out = layer.forward_native(x)
     torch.testing.assert_close(out,
                                ref_out,
                                atol=get_default_atol(out),
                                rtol=get_default_rtol(out))
-
-    # out = torch.empty_like(x)
-    # opcheck(fn, (out, x))

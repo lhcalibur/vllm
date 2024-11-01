@@ -148,7 +148,8 @@ def get_attn_backend(
         from vllm.attention.backends.pallas import PallasAttentionBackend
         return PallasAttentionBackend
     elif backend == _Backend.TRITON:
-        from vllm.attention.backends.triton_flash_attn import TritonFlashAttentionBackend
+        from vllm.attention.backends.triton_flash_attn import (
+            TritonFlashAttentionBackend)
         return TritonFlashAttentionBackend
     else:
         raise ValueError("Invalid attention backend.")

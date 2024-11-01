@@ -6,7 +6,9 @@ import torch
 
 from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
-from vllm.attention.ops.paged_attn_triton import reshape_and_cache as reshape_and_cache_triton, swap_blocks
+from vllm.attention.ops.paged_attn_triton import (
+    reshape_and_cache as reshape_and_cache_triton)
+from vllm.attention.ops.paged_attn_triton import swap_blocks
 from vllm.utils import seed_everything
 
 COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
@@ -273,14 +275,12 @@ def test_swap_blocks(
             (src_value_caches[0], dist_value_caches[0], block_mapping_tensor),
             cond=do_opcheck)
 
-    swap_blocks(src_key_caches[0], dist_key_caches[0],
-                    block_mapping_tensor)
+    swap_blocks(src_key_caches[0], dist_key_caches[0], block_mapping_tensor)
     swap_blocks(src_value_caches[0], dist_value_caches[0],
-                    block_mapping_tensor)
+                block_mapping_tensor)
 
     for src, dst in block_mapping:
         torch.testing.assert_close(src_key_caches_clone[src].cpu(),
                                    dist_key_caches[0][dst].cpu())
         torch.testing.assert_close(src_value_caches_clone[src].cpu(),
                                    dist_value_caches[0][dst].cpu())
-

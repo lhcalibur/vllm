@@ -47,55 +47,18 @@ def baseline_scaled_mm(a: torch.Tensor,
     return output
 
 
-# TODO support FP8
-# def triton_fp8_gemm_helper(m: int,
-#                             n: int,
-#                             k: int,
-#                             per_token_act_quant: bool,
-#                             per_out_channel_weight_quant: bool,
-#                             use_bias: bool,
-#                             out_dtype: Type[torch.dtype] = torch.bfloat16,
-#                             device: str = "cuda"):
-#     # Test for a triton kernel with per-token activation quantization
-#     # and per-output channel weight quantization.
-#     a = to_fp8(torch.randn((m, k), device=device))
-#     b = to_fp8(torch.randn((n, k), device=device).t())
-
-#     m_a_scales = m if per_token_act_quant else 1
-#     n_b_scales = n if per_out_channel_weight_quant else 1
-
-#     scale_a = (torch.randn((m_a_scales, 1), device=device,
-#                            dtype=torch.float32))
-#     scale_b = (torch.randn((1, n_b_scales), device=device,
-#                            dtype=torch.float32))
-#     if use_bias:
-#         bias = torch.rand((n, ), device=device, dtype=out_dtype) * 10
-#     else:
-#         bias = None
-
-#     out = ops.triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
-#     baseline = baseline_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
-
-#     torch.testing.assert_close(out, baseline, rtol=1e-2, atol=5e-2)
-
-#     opcheck(torch.triton.scaled_mm,
-#             (out, a, b, scale_a, scale_b, bias))
-
-
 def triton_int8_gemm_helper(m: int,
-                             n: int,
-                             k: int,
-                             per_token_act_quant: bool,
-                             per_out_channel_weight_quant: bool,
-                             use_bias: bool,
-                             out_dtype: Type[torch.dtype] = torch.bfloat16,
-                             device: str = "cuda"):
+                            n: int,
+                            k: int,
+                            per_token_act_quant: bool,
+                            per_out_channel_weight_quant: bool,
+                            use_bias: bool,
+                            out_dtype: Type[torch.dtype] = torch.bfloat16,
+                            device: str = "cuda"):
     # Test for a cutlass kernel with per-token activation quantization
     # and per-output channel weight quantization.
     a = to_int8(torch.randn((m, k), device=device) * 5)
     b = to_int8(torch.randn((n, k), device=device).t() * 5)
-
-
 
     m_a_scales = m if per_token_act_quant else 1
     n_b_scales = n if per_out_channel_weight_quant else 1
@@ -115,21 +78,7 @@ def triton_int8_gemm_helper(m: int,
 
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
 
-    opcheck(torch.ops.triton.scaled_mm,
-            (out, a, b, scale_a, scale_b, bias))
-
-
-# @pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 256, 512, 222, 100, 33])
-# @pytest.mark.parametrize("n", [2048, 4096, 8192, 16384, 24576, 256, 1024])
-# @pytest.mark.parametrize("k", [128, 496, 1024])
-# @pytest.mark.parametrize("per_act_token", [True, False])
-# @pytest.mark.parametrize("per_out_ch", [True, False])
-# @pytest.mark.parametrize("use_bias", [True, False])
-# @pytest.mark.skipif(not current_platform.has_device_capability(89),
-#                     reason="FP8 is not supported on this GPU type.")
-# def test_triton_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
-#                           per_out_ch: bool, use_bias: bool):
-#     triton_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, use_bias)
+    opcheck(torch.ops.triton.scaled_mm, (out, a, b, scale_a, scale_b, bias))
 
 
 @pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 256, 512, 222, 33, 1])
@@ -139,7 +88,7 @@ def triton_int8_gemm_helper(m: int,
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
 def test_triton_int8_gemm(m: int, n: int, k: int, per_act_token: bool,
-                           per_out_ch: bool, use_bias: bool):
+                          per_out_ch: bool, use_bias: bool):
     triton_int8_gemm_helper(m, n, k, per_act_token, per_out_ch, use_bias)
 
 
@@ -151,42 +100,12 @@ def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
                                         out_dtype: Type[torch.dtype],
                                         use_bias: bool):
     triton_int8_gemm_helper(512,
-                             512,
-                             512,
-                             per_act_token,
-                             per_out_ch,
-                             use_bias,
-                             out_dtype=out_dtype)
-
-
-# @pytest.mark.parametrize("per_act_token", [True, False])
-# @pytest.mark.parametrize("per_out_ch", [True, False])
-# @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
-# @pytest.mark.parametrize("use_bias", [True, False])
-# @pytest.mark.skipif(not current_platform.has_device_capability(89),
-#                     reason="FP8 is not supported on this GPU type.")
-# def test_cutlass_fp8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
-#                                        out_dtype: Type[torch.dtype],
-#                                        use_bias: bool):
-#     cutlass_fp8_gemm_helper(512,
-#                             512,
-#                             512,
-#                             per_act_token,
-#                             per_out_ch,
-#                             use_bias,
-#                             out_dtype=out_dtype)
-
-
-# @pytest.mark.parametrize("per_act_token", [True, False])
-# @pytest.mark.parametrize("per_out_ch", [True, False])
-# @pytest.mark.parametrize("use_bias", [True, False])
-# @pytest.mark.parametrize("device", CUDA_DEVICES)
-# @pytest.mark.skipif(not current_platform.has_device_capability(89),
-#                     reason="FP8 is not supported on this GPU type.")
-# def test_cutlass_fp8_gemm_devices(per_act_token: bool, per_out_ch: bool,
-#                                   use_bias: bool, device: str):
-#     cutlass_fp8_gemm_helper(512, 512, 512, per_act_token, per_out_ch, use_bias,
-#                             torch.bfloat16, device)
+                            512,
+                            512,
+                            per_act_token,
+                            per_out_ch,
+                            use_bias,
+                            out_dtype=out_dtype)
 
 
 @pytest.mark.parametrize("per_act_token", [True, False])
@@ -194,44 +113,26 @@ def test_cutlass_int8_gemm_output_dtype(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 def test_triton_int8_gemm_devices(per_act_token: bool, per_out_ch: bool,
-                                   use_bias: bool, device: str):
+                                  use_bias: bool, device: str):
     triton_int8_gemm_helper(512,
-                             512,
-                             512,
-                             per_act_token,
-                             per_out_ch,
-                             use_bias,
-                             out_dtype=torch.bfloat16,
-                             device=device)
-
-
-# # For the following two tests:
-# # N and K correspond to the size of the weight matrix and likely to be multiples
-# # of a large power of two. In any case, the kernel will have a naive fallback
-# # when N and K are not divisible by 16. But M is the number of tokens and the
-# # kernel must handle any M thrown at it.
-# @pytest.mark.parametrize("per_act_token", [True, False])
-# @pytest.mark.parametrize("per_out_ch", [True, False])
-# @pytest.mark.parametrize("use_bias", [True, False])
-# @pytest.mark.skipif(not current_platform.has_device_capability(89),
-#                     reason="FP8 is not supported on this GPU type.")
-# def test_cutlass_fp8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
-#                                   use_bias: bool):
-#     for nk in range(32, 128, 32):
-#         for m in range(1, 128):
-#             cutlass_fp8_gemm_helper(m, nk, nk, per_act_token, per_out_ch,
-#                                     use_bias)
+                            512,
+                            512,
+                            per_act_token,
+                            per_out_ch,
+                            use_bias,
+                            out_dtype=torch.bfloat16,
+                            device=device)
 
 
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
 def test_triton_int8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
-                                   use_bias: bool):
+                                  use_bias: bool):
     for nk in range(32, 128, 32):
         for m in range(1, 128):
             triton_int8_gemm_helper(m, nk, nk, per_act_token, per_out_ch,
-                                     use_bias)
+                                    use_bias)
 
 
 @pytest.mark.parametrize("m", [32, 64, 128])
@@ -240,7 +141,7 @@ def test_triton_int8_gemm_m_sweep(per_act_token: bool, per_out_ch: bool,
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skip
 def test_triton_int8_azp_bias_fold(m: int, n: int, k: int,
-                                    out_dtype: torch.dtype):
+                                   out_dtype: torch.dtype):
     # Currently, the test is failing because folding azp into
     # 16-bit bias loses too much precision
     scale_a = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
@@ -276,13 +177,13 @@ def test_triton_int8_azp_bias_fold(m: int, n: int, k: int,
             dtype=out_dtype, device='cuda')
 
     out = ops.triton_scaled_mm_azp(aq_i8,
-                                bq_i8,
-                                scale_a,
-                                scale_b,
-                                out_dtype=out_dtype,
-                                azp_adj=J,
-                                azp=azp_aq_i8,
-                                bias=azp_bias[0, :])
+                                   bq_i8,
+                                   scale_a,
+                                   scale_b,
+                                   out_dtype=out_dtype,
+                                   azp_adj=J,
+                                   azp=azp_aq_i8,
+                                   bias=azp_bias[0, :])
     torch.testing.assert_close(out, baseline_dq, rtol=1e-2, atol=1e0)
     torch.testing.assert_close(out, baseline_q, rtol=1e-2, atol=1e0)
 
@@ -294,7 +195,7 @@ def test_triton_int8_azp_bias_fold(m: int, n: int, k: int,
 @pytest.mark.parametrize("use_bias", [True, False])
 @pytest.mark.parametrize("azp_per_token", [True, False])
 def test_triton_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
-                          use_bias: bool, azp_per_token: bool):
+                         use_bias: bool, azp_per_token: bool):
     m_azp = m if azp_per_token else 1
     scale_a = torch.randn((m_azp, 1), device="cuda", dtype=torch.float32) / 10
     scale_b = torch.randn((1, n), device="cuda", dtype=torch.float32) / 10
@@ -338,13 +239,13 @@ def test_triton_int8_azp(m: int, n: int, k: int, out_dtype: torch.dtype,
 
     if azp_per_token:
         out = ops.triton_scaled_mm_azp(aq_i8, bq_i8, scale_a, scale_b,
-                                        out_dtype, azp_adj_i32, azp_i32,
-                                        func_bias)
+                                       out_dtype, azp_adj_i32, azp_i32,
+                                       func_bias)
     else:
         azp_with_adj_i32 = azp_i32 * azp_adj_i32
         out = ops.triton_scaled_mm_azp(aq_i8, bq_i8, scale_a, scale_b,
-                                        out_dtype, azp_with_adj_i32, None,
-                                        func_bias)
+                                       out_dtype, azp_with_adj_i32, None,
+                                       func_bias)
 
     # bfloat16 precision is 7-bit mantissa -> 2^-8 ~ 0.4%
     # float16 precision is 10-bit mantissa -> 2^-11 ~ 0.05%
@@ -377,10 +278,10 @@ def test_triton_subset():
     scale_b = torch.randn((1, 1), device="cuda", dtype=torch.float32) / 10
 
     out = ops.triton_scaled_mm(a,
-                                b,
-                                scale_a,
-                                scale_b,
-                                out_dtype=torch.bfloat16)
+                               b,
+                               scale_a,
+                               scale_b,
+                               out_dtype=torch.bfloat16)
     baseline = baseline_scaled_mm(a,
                                   b,
                                   scale_a,
@@ -402,7 +303,7 @@ class TritonLayer(torch.nn.Module):
 
     def forward(self, a):
         return ops.triton_scaled_mm(a, self.b, self.scale_a, self.scale_b,
-                                     self.out_dtype)
+                                    self.out_dtype)
 
 
 @pytest.mark.parametrize("per_act_token", [True, False])

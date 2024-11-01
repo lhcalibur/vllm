@@ -24,6 +24,8 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm.platforms import current_platform
+
 torch_dtype: tl.constexpr = torch.float16
 
 
@@ -207,8 +209,8 @@ def _attn_fwd_inner(
     return acc, l_i, m_i
 
 
-@triton.autotune(
-    configs=[
+def get_hip_autotune_config():
+    return [
         triton.Config(
             {
                 "BLOCK_M": 256,
@@ -302,7 +304,105 @@ def _attn_fwd_inner(
             num_stages=1,
             num_warps=4,
         ),
-    ],
+    ]
+
+
+# TODO: tune this config for cuda
+def get_cuda_autotune_config():
+    return [
+        triton.Config(
+            {
+                "BLOCK_M": 256,
+                "BLOCK_N": 64,
+                "PRE_LOAD_V": False,
+            },
+            num_stages=1,
+            num_warps=8,
+        ),
+        triton.Config(
+            {
+                "BLOCK_M": 128,
+                "BLOCK_N": 128,
+                "PRE_LOAD_V": False,
+            },
+            num_stages=1,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_M": 256,
+                "BLOCK_N": 128,
+                "PRE_LOAD_V": False,
+            },
+            num_stages=1,
+            num_warps=8,
+        ),
+        triton.Config(
+            {
+                "BLOCK_M": 128,
+                "BLOCK_N": 64,
+                "PRE_LOAD_V": False,
+            },
+            num_stages=1,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_M": 128,
+                "BLOCK_N": 64,
+                "PRE_LOAD_V": True,
+            },
+            num_stages=1,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_M": 128,
+                "BLOCK_N": 64,
+                "PRE_LOAD_V": False,
+            },
+            num_stages=1,
+            num_warps=4,
+        ),
+        triton.Config(
+            {
+                "BLOCK_M": 64,
+                "BLOCK_N": 64,
+                "PRE_LOAD_V": False,
+            },
+            num_stages=1,
+            num_warps=8,
+        ),
+        triton.Config(
+            {
+                "BLOCK_M": 32,
+                "BLOCK_N": 32,
+                "PRE_LOAD_V": False,
+            },
+            num_stages=1,
+            num_warps=8,
+        ),
+        triton.Config(
+            {
+                "BLOCK_M": 16,
+                "BLOCK_N": 16,
+                "PRE_LOAD_V": False,
+            },
+            num_stages=1,
+            num_warps=4,
+        ),
+    ]
+
+
+def get_autotune_config():
+    if current_platform.is_cuda():
+        return get_cuda_autotune_config()
+    else:
+        return get_hip_autotune_config()
+
+
+@triton.autotune(
+    configs=get_autotune_config(),
     key=['IS_CAUSAL', 'dropout_p', 'BLOCK_DMODEL'],
 )
 @triton.jit

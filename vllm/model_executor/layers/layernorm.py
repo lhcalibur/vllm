@@ -87,13 +87,13 @@ class RMSNorm(CustomOp):
             self.weight.data,
             self.variance_epsilon,
         )
-    
+
     def forward_triton(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        from vllm._triton_ops import rms_norm, fused_add_rms_norm
+        from vllm._triton_ops import fused_add_rms_norm, rms_norm
 
         if residual is not None:
             fused_add_rms_norm(
