@@ -24,23 +24,21 @@ import triton.testing
 from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT, get_rope
 from vllm.utils import FlexibleArgumentParser, seed_everything
 
-# 配置基准测试参数
 configs = [
     triton.testing.Benchmark(
-        x_names=['head_size'],  # x轴参数名
-        x_vals=[64, 80, 96, 112, 120, 128, 192, 256],  # head_size 的可能值
-        line_arg='provider',  # 用于区分不同实现的参数
+        x_names=['head_size'],
+        x_vals=[64, 80, 96, 112, 120, 128, 192, 256],
+        line_arg='provider',
         line_vals=[
             'batched', 'non-batched', 'batched-triton', 'non-batched-triton'
-        ],  # 四种实现方式
+        ],
         line_names=[
             'Batched RoPE', 'Non-batched RoPE', 'Batched RoPE (Triton)',
             'Non-batched RoPE (Triton)'
-        ],  # 图例名称
-        styles=[('blue', '-'), ('red', '-'), ('green', '-'),
-                ('orange', '-')],  # 线型和颜色
-        ylabel='Latency (ms)',  # y轴标签
-        plot_name='rope-performance',  # 图表标题
+        ],
+        styles=[('blue', '-'), ('red', '-'), ('green', '-'), ('orange', '-')],
+        ylabel='Latency (ms)',
+        plot_name='rope-performance',
         args={
             'max_position': 8192,
             'base': 10000,
@@ -63,10 +61,8 @@ def benchmark(seed,
               base=10000,
               is_neox_style=True):
     """RoPE kernel benchmark function"""
-    # 设置随机种子
     seed_everything(seed)
 
-    # 准备输入张量
     positions = torch.randint(0,
                               max_position, (batch_size, seq_len),
                               device=device)
@@ -79,13 +75,11 @@ def benchmark(seed,
 
     scaling_factors = [1, 2, 4, 8]
 
-    # 清空缓存
     _ROPE_DICT.clear()
 
     if provider in ['batched', 'batched-triton']:
         if provider == 'batched-triton':
             os.environ["VLLM_PREFER_TRITON_OPS"] = "1"
-        # 准备 batched 版本
         batched_rope = get_rope(head_size, rotary_dim, max_position, base,
                                 is_neox_style, {
                                     "type": "linear",
@@ -105,11 +99,9 @@ def benchmark(seed,
         query_offsets = offset_map[query_types]
         flatten_offsets = query_offsets.flatten()
 
-        # 定义测试函数
         def run_batched():
             batched_rope.forward(positions, query, key, flatten_offsets)
 
-        # 运行基准测试
         quantiles = [0.5, 0.2, 0.8]
         ms, min_ms, max_ms = triton.testing.do_bench(run_batched,
                                                      quantiles=quantiles)
@@ -119,7 +111,6 @@ def benchmark(seed,
     else:
         if provider == 'non-batched-triton':
             os.environ["VLLM_PREFER_TRITON_OPS"] = "1"
-        # 准备 non-batched 版本
         non_batched_ropes = [
             get_rope(head_size, rotary_dim, max_position, base, is_neox_style,
                      {
@@ -138,12 +129,10 @@ def benchmark(seed,
         keys = [key[query_types == i] for i in range(len(scaling_factors))]
         packed_qkr = list(zip(queries, keys, non_batched_ropes))
 
-        # 定义测试函数
         def run_non_batched():
             for q, k, r in packed_qkr:
                 r.forward(positions, q, k)
 
-        # 运行基准测试
         quantiles = [0.5, 0.2, 0.8]
         ms, min_ms, max_ms = triton.testing.do_bench(run_non_batched,
                                                      quantiles=quantiles)
@@ -173,7 +162,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
     print(args)
 
-    # 运行基准测试
     benchmark.run(
         show_plots=False,
         print_data=True,
