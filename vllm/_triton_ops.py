@@ -1505,6 +1505,8 @@ def scaled_mm(out: torch.Tensor,
     # M: number of rows in A (batch size)
     # K: number of columns in A / rows in B (hidden dimension)
     # N: number of columns in B (output dimension)
+    assert b.stride(0) == 1, "b must have contiguous K dimension"
+
     M, K = a.shape
     _, N = b.shape
 
@@ -1599,23 +1601,23 @@ def triton_scaled_mm_azp(a: torch.Tensor,
     Computes: C = (a_scales * (A - azp)) @ (b_scales * B) + bias
     where azp_adj = sum(B, dim=0) is precomputed for efficiency
     """
-    # Step 1: Validate input tensor data types
-    # A and B must be int8 or float8, scales must be float32
+    # Validate input tensor data types
+    assert b.stride(0) == 1, "b must have contiguous K dimension"
     assert a.dtype in [torch.int8, torch.float8_e4m3fn]
     assert b.dtype == a.dtype
     assert a_scales.dtype == torch.float32
     assert b_scales.dtype == torch.float32
 
-    # Step 3: Extract matrix dimensions
+    # Extract matrix dimensions
     # M = batch size, K = hidden dim, N = output dim
     M, K = a.shape
     _, N = b.shape
 
-    # Step 4: Allocate output tensor with specified dtype
+    # Allocate output tensor with specified dtype
     c = torch.empty((M, N), device=a.device, dtype=out_dtype)
 
     # Step 5: Call Triton kernel for scaled matrix multiply with AZP
     scaled_mm(c, a, b, a_scales, b_scales, azp_adj, azp, bias)
 
-    # Step 6: Return computed result
+    # Return computed result
     return c
