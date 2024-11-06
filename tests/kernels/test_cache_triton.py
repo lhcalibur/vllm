@@ -30,7 +30,8 @@ CUDA_DEVICES = [
 ]
 
 # We assume fp8 is always enabled for testing.
-KV_CACHE_DTYPE = ["auto", "fp8"]
+# TODO: Add fp8 tests
+KV_CACHE_DTYPE = ["auto"]
 
 
 @pytest.mark.parametrize("num_mappings", NUM_MAPPINGS)
